@@ -21,3 +21,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_service"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+markers = [
+    "unit: 单元测试，只验证单个模块或工具的行为",
+    "integration: 集成测试，验证项目内部模块之间的协作",
+    "external: 真实外部环境测试，需要操作系统进程、网络或真实 API",
+]
