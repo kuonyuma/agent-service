@@ -26,3 +26,7 @@ jobs:
           pwd
           echo "仓库文件:"
           ls -la  
+      - name: 故意失败
+        run: |
+          echo "我准备让这个任务失败"
+          exit 1
