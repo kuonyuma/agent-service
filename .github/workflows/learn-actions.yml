@@ -1,0 +1,28 @@
+name: Learn GitHub Actions
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  learn:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 获取代码
+        uses: actions/checkout@v6
+
+      - name: 查看运行环境
+        run: |
+          echo "触发事件: ${{ github.event_name }}"
+          echo "当前分支: ${{ github.ref_name }}"
+          echo "Python 版本:"
+          python --version
+          echo "当前目录:"
+          pwd
+          echo "仓库文件:"
+          ls -la  
