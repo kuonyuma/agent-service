@@ -1,32 +1,46 @@
-name: Learn GitHub Actions
+name: Python CI
 
 on:
   push:
+    branches:
+      - main
+      - develop
+
   pull_request:
+
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  learn:
+  tests:
+    name: Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: 获取代码
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
-      - name: 查看运行环境
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装项目依赖
         run: |
-          echo "触发事件: ${{ github.event_name }}"
-          echo "当前分支: ${{ github.ref_name }}"
-          echo "Python 版本:"
-          python --version
-          echo "当前目录:"
-          pwd
-          echo "仓库文件:"
-          ls -la  
-      - name: 恢复成功
-        run: |
-          echo "任务恢复成功"
-          exit 0
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: 运行单元测试
+        run: pytest -q tests/unit
+
+      - name: 运行集成测试
+        run: pytest -q tests/integration
+
+      - name: 运行 Ruff
+        run: ruff check .
+
+      - name: 运行 Pyright
+        run: pyright
