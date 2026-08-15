@@ -1,6 +1,8 @@
+import asyncio
 import subprocess
+from typing import Any, ClassVar
+
 from agent_service.tools.base import Tool, ToolResult
-from typing import Any
 
 
 class RunCommandTool(Tool):
@@ -10,7 +12,7 @@ class RunCommandTool(Tool):
         "适用于运行脚本、安装依赖、查看系统信息等操作。"
         "命令会在当前工作目录下执行。"
     )
-    input_schema = {
+    input_schema: ClassVar[dict[str, Any]] = {
         "type": "OBJECT",
         "properties": {
             "command": {
@@ -26,9 +28,19 @@ class RunCommandTool(Tool):
         command = parameter.get("command", "")
 
         if command == "":
-            return ToolResult(is_error=True, content=f"执行的命令command为空")
+            return ToolResult(is_error=True, content="执行的命令command为空")
 
-        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            return ToolResult(content=f"执行命令出错\n错误信息:{exc}", is_error=True)
 
         out = result.stdout + result.stderr + f"returncode{result.returncode}"
 

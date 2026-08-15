@@ -1,6 +1,9 @@
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
+from typing import Any, Literal
+
 from google.genai import types
-from typing import Any, Literal, AsyncGenerator
+
 from agent_service.client.client import get_client
 from agent_service.config.settings import settings
 
@@ -28,7 +31,7 @@ async def stream_message(
     system_prompt: str | None = "你是一位编程助手",
     max_tokens: int | None = None,
     tools: list[types.Tool] | None = None,
-) -> AsyncGenerator[StreamEvent, None]:
+) -> AsyncGenerator[StreamEvent]:
     client = get_client()
 
     config = types.GenerateContentConfig(

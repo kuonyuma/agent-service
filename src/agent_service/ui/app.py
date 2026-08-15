@@ -2,11 +2,12 @@ from google.genai import types
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.live import Live
-from agent_service.tools.index import get_function_declarations
+from rich.markdown import Markdown
+
 from agent_service.core.agentic_loop import LoopResult, query
 from agent_service.core.context import compress_context
+from agent_service.tools.index import get_function_declarations
 
 console = Console()
 

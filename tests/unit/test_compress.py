@@ -74,7 +74,11 @@ async def test_compress_exceed_threshold(monkeypatch, count, expected_length):
 
     assert len(compressed) == expected_length
     assert compressed[0].role == "user"
-    assert len(compressed[0].parts) == 2
-    assert "HTTPS" in compressed[0].parts[1].text
+    first_parts = compressed[0].parts
+    assert first_parts is not None
+    assert len(first_parts) == 2
+    summary_text = first_parts[1].text
+    assert summary_text is not None
+    assert "HTTPS" in summary_text
     assert compressed[1].role == "model"
     assert compressed[-2:] == mock_contents[-2:]

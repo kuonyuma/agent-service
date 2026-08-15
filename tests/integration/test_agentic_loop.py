@@ -150,3 +150,21 @@ async def test_query_stops_after_ten_tool_turns(monkeypatch):
     assert events[-1].type == "turn_complete"
     assert events[-1].result is not None
     assert events[-1].result.reason == "max_turns"
+
+
+@pytest.mark.asyncio
+async def test_query_stops_when_function_call_has_no_name(monkeypatch):
+    async def fake_stream_message(*args, **kwargs):
+        yield message_done(function_calls=[types.FunctionCall(args={})])
+
+    monkeypatch.setattr(
+        agent_service.core.agentic_loop,
+        "stream_message",
+        fake_stream_message,
+    )
+
+    events = [event async for event in query(initial_contents(), tools=[])]
+
+    assert [event.type for event in events] == ["turn_complete"]
+    assert events[-1].result is not None
+    assert events[-1].result.reason == "error"

@@ -1,6 +1,8 @@
 import os
 import sys
+
 from google import genai
+
 from agent_service.config.settings import settings
 
 client: genai.Client | None = None

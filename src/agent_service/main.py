@@ -1,5 +1,6 @@
-from agent_service.ui.app import App
 import asyncio
+
+from agent_service.ui.app import App
 
 
 async def main():

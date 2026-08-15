@@ -1,6 +1,7 @@
 from pathlib import Path
+from typing import Any, ClassVar
+
 from agent_service.tools.base import Tool, ToolResult
-from typing import Any
 
 
 class ListFilesTool(Tool):
@@ -9,7 +10,7 @@ class ListFilesTool(Tool):
         "获取指定目录下的所有文件和子目录列表。如果不传路径，默认列出当前目录."
     )
     read_only = True
-    input_schema = {
+    input_schema: ClassVar[dict[str, Any]] = {
         "type": "OBJECT",
         "properties": {
             "path": {"type": "STRING", "description": "要查看的目录绝对路径或相对路径"}

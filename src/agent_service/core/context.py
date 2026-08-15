@@ -1,5 +1,6 @@
 from google.genai import types
-from agent_service.client.stream_message import stream_message, StreamResult
+
+from agent_service.client.stream_message import StreamResult, stream_message
 
 
 async def compress_context(

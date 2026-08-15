@@ -1,6 +1,7 @@
 from pathlib import Path
+from typing import Any, ClassVar
+
 from agent_service.tools.base import Tool, ToolResult
-from typing import Any
 
 
 class EditFileTool(Tool):
@@ -11,7 +12,7 @@ class EditFileTool(Tool):
         "surrounding lines to make it unique. Read the file first so "
         "old_string matches the current content exactly."
     )
-    input_schema = {
+    input_schema: ClassVar[dict[str, Any]] = {
         "type": "OBJECT",
         "properties": {
             "path": {

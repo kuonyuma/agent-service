@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-
 _CATEGORIES = {
     "unit": pytest.mark.unit,
     "integration": pytest.mark.integration,

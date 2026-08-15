@@ -13,15 +13,11 @@ dependencies = [
     { name = "rich" },
 ]
 
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
 
@@ -29,16 +25,15 @@ dev = [
 requires-dist = [
     { name = "google-genai" },
     { name = "prompt-toolkit" },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "pyyaml" },
     { name = "rich" },
 ]
-provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "pyright", specifier = ">=1.1.411" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "ruff", specifier = ">=0.16.3" },
 ]
 
