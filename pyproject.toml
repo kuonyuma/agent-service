@@ -9,12 +9,6 @@ dependencies = [
     "rich",
 ]
 
-[dependency-groups]
-dev = [
-    "pytest",
-    "pytest-asyncio",
-]
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -30,4 +24,12 @@ markers = [
     "unit: 单元测试，只验证单个模块或工具的行为",
     "integration: 集成测试，验证项目内部模块之间的协作",
     "external: 真实外部环境测试，需要操作系统进程、网络或真实 API",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+    "ruff>=0.16.3",
+    "pytest",
+    "pytest-asyncio",
 ]
