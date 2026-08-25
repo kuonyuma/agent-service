@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from agent_service.tools.base import Tool, ToolResult
+from agent_service.tools.workspace import WorkspacePathError, WorkspacePathPolicy
 
 
 class ListFilesTool(Tool):
@@ -17,8 +18,26 @@ class ListFilesTool(Tool):
         },
     }
 
+    def __init__(self, workspace_policy: WorkspacePathPolicy | None = None) -> None:
+        self.workspace_policy = workspace_policy
+
     async def run(self, parameter: dict[str, Any]) -> ToolResult:
-        path = Path(parameter.get("path", "."))
+        raw_path = parameter.get("path", ".")
+        if self.workspace_policy is not None:
+            try:
+                path = self.workspace_policy.resolve_existing(
+                    raw_path,
+                    expected="directory",
+                )
+                items = self.workspace_policy.list_directory(path)
+                display_path = self.workspace_policy.display_path(path)
+                content = f"路径:{display_path}下的内容为:" + "\n".join(items)
+                self.workspace_policy.ensure_output(content)
+            except WorkspacePathError as exc:
+                return ToolResult(content=f"列出目录被拒绝：{exc}", is_error=True)
+            return ToolResult(content=content, is_error=False)
+
+        path = Path(raw_path)
         absolute_path = path.resolve()
         if not absolute_path.exists():
             content = "不存在该路径"

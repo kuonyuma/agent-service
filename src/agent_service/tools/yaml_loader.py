@@ -5,6 +5,7 @@ from typing import Any, ClassVar
 import yaml
 
 from agent_service.tools.base import Tool, ToolResult
+from agent_service.tools.workspace import WorkspacePathError, WorkspacePathPolicy
 
 
 class LoadYamlTool(Tool):
@@ -19,22 +20,39 @@ class LoadYamlTool(Tool):
 
     read_only = True
 
+    def __init__(self, workspace_policy: WorkspacePathPolicy | None = None) -> None:
+        self.workspace_policy = workspace_policy
+
     async def run(self, parameter: dict[str, Any]) -> ToolResult:
         str_path = parameter.get("path", "")
 
         if str_path == "":
             content = "查询配置文件的字符串路径为空"
             return ToolResult(content=content, is_error=True)
-        absolute_path = Path(str_path).resolve()
-        if not absolute_path.exists():
-            content = f" 路径:{absolute_path}下文件不存在"
-            return ToolResult(content=content, is_error=True)
-        try:
-            yaml_text = await asyncio.to_thread(
-                absolute_path.read_text, encoding="utf-8"
-            )
-        except (OSError, UnicodeDecodeError) as exc:
-            return ToolResult(content=f"读取配置文件失败: {exc}", is_error=True)
+
+        if self.workspace_policy is not None:
+            try:
+                absolute_path = self.workspace_policy.resolve_existing(
+                    str_path,
+                    expected="file",
+                )
+                yaml_text = await asyncio.to_thread(
+                    self.workspace_policy.read_text,
+                    absolute_path,
+                )
+            except WorkspacePathError as exc:
+                return ToolResult(content=f"读取 YAML 被拒绝：{exc}", is_error=True)
+        else:
+            absolute_path = Path(str_path).resolve()
+            if not absolute_path.exists():
+                content = f" 路径:{absolute_path}下文件不存在"
+                return ToolResult(content=content, is_error=True)
+            try:
+                yaml_text = await asyncio.to_thread(
+                    absolute_path.read_text, encoding="utf-8"
+                )
+            except (OSError, UnicodeDecodeError) as exc:
+                return ToolResult(content=f"读取配置文件失败: {exc}", is_error=True)
         try:
             config = await asyncio.to_thread(yaml.safe_load, yaml_text)
         except yaml.YAMLError as exc:
@@ -42,4 +60,9 @@ class LoadYamlTool(Tool):
         if config is None:
             return ToolResult(content=f"文件为空: {absolute_path}", is_error=True)
         content = yaml.dump(config, allow_unicode=True)
+        if self.workspace_policy is not None:
+            try:
+                self.workspace_policy.ensure_output(content)
+            except WorkspacePathError as exc:
+                return ToolResult(content=f"读取 YAML 被拒绝：{exc}", is_error=True)
         return ToolResult(content=content, is_error=False)

@@ -1,7 +1,9 @@
+import asyncio
 from pathlib import Path
 from typing import Any, ClassVar
 
 from agent_service.tools.base import Tool, ToolResult
+from agent_service.tools.workspace import WorkspacePathError, WorkspacePathPolicy
 
 
 class EditFileTool(Tool):
@@ -32,17 +34,36 @@ class EditFileTool(Tool):
     }
     read_only = False
 
+    def __init__(self, workspace_policy: WorkspacePathPolicy | None = None) -> None:
+        self.workspace_policy = workspace_policy
+
     async def run(self, parameter: dict[str, Any]) -> ToolResult:
         path_str = parameter.get("path", "")
         old_str = parameter.get("old_string", "")
         new_str = parameter.get("new_string", "")
 
-        path = Path(path_str).resolve()
+        if not all(isinstance(value, str) for value in (path_str, old_str, new_str)):
+            return ToolResult(content="路径和替换内容必须是字符串", is_error=True)
 
-        if not path.exists():
-            content = "路径不存在"
-            return ToolResult(content=content, is_error=True)
-        file_text = path.read_text(encoding="utf-8")
+        if self.workspace_policy is not None:
+            try:
+                path = self.workspace_policy.resolve_existing(
+                    path_str,
+                    expected="file",
+                )
+                file_text = await asyncio.to_thread(
+                    self.workspace_policy.read_text,
+                    path,
+                )
+            except WorkspacePathError as exc:
+                return ToolResult(content=f"修改文件被拒绝：{exc}", is_error=True)
+        else:
+            path = Path(path_str).resolve()
+
+            if not path.exists():
+                content = "路径不存在"
+                return ToolResult(content=content, is_error=True)
+            file_text = path.read_text(encoding="utf-8")
 
         count = file_text.count(old_str)
 
@@ -53,5 +74,12 @@ class EditFileTool(Tool):
             content = f"未找到被修改字符串{old_str}，无法修改"
             return ToolResult(content=content, is_error=True)
         result = file_text.replace(old_str, new_str)
-        path.write_text(result, encoding="utf-8")
+        if self.workspace_policy is not None:
+            try:
+                self.workspace_policy.validate_write_content(result)
+                await asyncio.to_thread(path.write_text, result, encoding="utf-8")
+            except (WorkspacePathError, OSError, UnicodeEncodeError) as exc:
+                return ToolResult(content=f"修改文件被拒绝：{exc}", is_error=True)
+        else:
+            path.write_text(result, encoding="utf-8")
         return ToolResult(content=f"成功！文件 {path.name} 已被修改。", is_error=False)

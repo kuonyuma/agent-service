@@ -1,0 +1,70 @@
+name: agent-service
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-agent_service}
+      MYSQL_USER: ${MYSQL_USER:-agent_service}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-agent_service_dev}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-agent_service_root_dev}
+    ports:
+      - "127.0.0.1:3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -u root --password=\"$${MYSQL_ROOT_PASSWORD}\" --silent",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  migrate:
+    build:
+      context: .
+    environment:
+      AGENT_SERVICE_DATABASE_URL: mysql+asyncmy://${MYSQL_USER:-agent_service}:${MYSQL_PASSWORD:-agent_service_dev}@mysql:3306/${MYSQL_DATABASE:-agent_service}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      AGENT_SERVICE_DATABASE_URL: mysql+asyncmy://${MYSQL_USER:-agent_service}:${MYSQL_PASSWORD:-agent_service_dev}@mysql:3306/${MYSQL_DATABASE:-agent_service}
+      AGENT_SERVICE_WORKSPACE_ROOT: /app/web-workspaces
+      AGENT_SERVICE_WEB_MUTATING_TOOLS_ENABLED: ${AGENT_SERVICE_WEB_MUTATING_TOOLS_ENABLED:-false}
+      AGENT_SERVICE_WEB_QUALITY_TOOL_ENABLED: ${AGENT_SERVICE_WEB_QUALITY_TOOL_ENABLED:-false}
+      AGENT_SERVICE_APPROVAL_TIMEOUT_SECONDS: ${AGENT_SERVICE_APPROVAL_TIMEOUT_SECONDS:-60}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  mysql_data:

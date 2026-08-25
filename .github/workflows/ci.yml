@@ -4,42 +4,172 @@ on:
   push:
     branches:
       - main
+      - develop
       - feature/src-layout
   pull_request:
-
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "true"
+
 jobs:
-  tests:
-    name: Tests
+  quality:
+    name: Ruff 与 Pyright
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
     steps:
       - name: 获取代码
         uses: actions/checkout@v4
 
-      - name: 设置 Python
-        uses: actions/setup-python@v5
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
-          python-version: "3.14"
+          version: "0.11.20"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
-      - name: 安装项目依赖
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install --group dev .
+      - name: 安装 Python
+        run: uv python install 3.14
 
-      - name: 运行单元测试
-        run: python -m pytest -q tests/unit
-
-      - name: 运行集成测试
-        run: python -m pytest -q tests/integration
+      - name: 从锁文件同步依赖
+        run: uv sync --frozen --all-groups
 
       - name: 运行 Ruff
-        run: python -m ruff check .
+        run: uv run --frozen ruff check .
 
       - name: 运行 Pyright
-        run: python -m pyright
+        run: uv run --frozen pyright
+
+  windows-tests:
+    name: Windows 单元与内部集成测试
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: 获取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.20"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: 安装 Python
+        run: uv python install 3.14
+
+      - name: 从锁文件同步依赖
+        run: uv sync --frozen --all-groups
+
+      - name: 运行测试
+        shell: pwsh
+        run: >-
+          uv run --frozen pytest -q tests/unit tests/integration
+          --basetemp "$env:RUNNER_TEMP\agent-service-pytest"
+
+  mysql-integration:
+    name: MySQL 迁移与集成测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: agent_service_test
+          MYSQL_USER: agent_service
+          MYSQL_PASSWORD: agent_service_test
+          MYSQL_ROOT_PASSWORD: root_test
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -proot_test --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+          --health-start-period=20s
+    env:
+      AGENT_SERVICE_DATABASE_URL: mysql+asyncmy://agent_service:agent_service_test@127.0.0.1:3307/agent_service_test
+      AGENT_SERVICE_TEST_DATABASE_URL: mysql+asyncmy://agent_service:agent_service_test@127.0.0.1:3307/agent_service_test
+    steps:
+      - name: 获取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.20"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: 安装 Python
+        run: uv python install 3.14
+
+      - name: 从锁文件同步依赖
+        run: uv sync --frozen --all-groups
+
+      - name: 验证迁移升级、模型一致性与回滚
+        run: |
+          uv run --frozen alembic upgrade head
+          uv run --frozen alembic check
+          uv run --frozen alembic downgrade base
+          uv run --frozen alembic upgrade head
+
+      - name: 运行真实 MySQL 集成测试
+        shell: bash
+        run: |
+          shopt -s nullglob
+          mysql_tests=(tests/external/test_mysql_*.py)
+          if (( ${#mysql_tests[@]} == 0 )); then
+            echo "::error::未找到 tests/external/test_mysql_*.py，不能跳过真实 MySQL 验证"
+            exit 1
+          fi
+          uv run --frozen pytest --run-external -q "${mysql_tests[@]}"
+
+  docker-build:
+    name: Docker 镜像构建
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 获取代码
+        uses: actions/checkout@v4
+
+      - name: 验证 Compose 配置
+        run: docker compose config --quiet
+
+      - name: 构建镜像
+        run: docker build --tag agent-service:ci .
+
+      - name: 启动 Compose 完整链路
+        run: docker compose up -d --build --wait --wait-timeout 180
+
+      - name: 验证健康检查与创建会话
+        shell: bash
+        run: |
+          curl --fail --silent --show-error \
+            http://127.0.0.1:8000/health/live \
+            --output /tmp/agent-service-live.json
+          curl --fail --silent --show-error \
+            http://127.0.0.1:8000/health/ready \
+            --output /tmp/agent-service-ready.json
+          curl --fail --silent --show-error \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --data '{"title":"CI Compose smoke"}' \
+            http://127.0.0.1:8000/api/v1/conversations \
+            --output /tmp/agent-service-conversation.json
+          python -c 'import json; data = json.load(open("/tmp/agent-service-conversation.json", encoding="utf-8")); assert data["id"] and data["title"] == "CI Compose smoke"'
+
+      - name: 收集 Compose 日志并清理
+        if: always()
+        shell: bash
+        run: |
+          docker compose ps -a || true
+          docker compose logs --no-color || true
+          docker compose down --volumes --remove-orphans
