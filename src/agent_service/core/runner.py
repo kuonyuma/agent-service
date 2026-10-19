@@ -27,6 +27,7 @@ class AgentRunner:
         tool_registry: Mapping[str, Tool] | None = None,
         system_prompt: str | None = None,
         max_turns: int = 10,
+        plan_and_execute: bool = True,
     ) -> None:
         self.tool_registry = dict(tool_registry) if tool_registry is not None else None
         self.tools = (
@@ -37,6 +38,7 @@ class AgentRunner:
         self.allowed_tool_names = allowed_tool_names
         self.system_prompt = system_prompt
         self.max_turns = max_turns
+        self.plan_and_execute = plan_and_execute
 
     async def run_turn(
         self,
@@ -68,6 +70,7 @@ class AgentRunner:
             tool_registry=self.tool_registry,
             system_prompt=self.system_prompt,
             max_turns=self.max_turns,
+            plan_and_execute=self.plan_and_execute,
         ):
             yield event
 

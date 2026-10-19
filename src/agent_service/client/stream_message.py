@@ -35,10 +35,14 @@ async def stream_message(
     client = get_client()
 
     config = types.GenerateContentConfig(
-        system_instruction=system_prompt, max_output_tokens=max_tokens, tools=tools
+        system_instruction=system_prompt,
+        max_output_tokens=max_tokens,
+        tools=tools,
     )
     response = await client.aio.models.generate_content_stream(
-        model=settings.model_config.name, contents=contents, config=config
+        model=settings.model_config.name,
+        contents=contents,
+        config=config,
     )
 
     yield StreamEvent(type="message_start")

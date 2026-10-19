@@ -6,9 +6,29 @@ from rich.live import Live
 from rich.markdown import Markdown
 
 from agent_service.core.agentic_loop import LoopResult, ToolApprovalRequest
+from agent_service.core.plan import AgentPhase, ExecutionPlan
 from agent_service.core.runner import AgentRunner
 
 console = Console()
+
+
+def _build_display_markdown(
+    full_text: str,
+    plan: ExecutionPlan | None,
+    status_hint: str = "",
+) -> Markdown:
+    sections: list[str] = []
+    if plan is not None and plan.steps:
+        sections.append(plan.format_markdown())
+    if full_text:
+        sections.append(full_text)
+    if status_hint:
+        sections.append(status_hint)
+    return Markdown("\n\n---\n\n".join(sections) if sections else "")
+
+
+def _phase_label(phase: AgentPhase) -> str:
+    return "🔍 规划阶段" if phase == "planning" else "⚙️ 执行阶段"
 
 
 class App:
@@ -16,6 +36,7 @@ class App:
         self.contents: list[types.Content] = []
         self.session = PromptSession()
         self.runner = runner or AgentRunner()
+        self._active_live: Live | None = None
 
     async def run(self):
 
@@ -31,19 +52,48 @@ class App:
     async def run_turn(self, user_query: str):
         result: LoopResult | None = None
         full_text: str = ""
-        with Live(Markdown(full_text), console=console, refresh_per_second=15) as live:
-            async for loop_event in self.runner.run_turn(
-                history=self.contents,
-                user_query=user_query,
-                permission_check=self.permission_check,
-            ):
-                if loop_event.type == "text.delta":
-                    full_text += loop_event.text
-                    live.update(Markdown(full_text))
-                elif loop_event.type == "tool.requested":
-                    live.update(Markdown(full_text + "\n\n模型使用工具中.."))
-                elif loop_event.type in {"run.completed", "run.failed"}:
-                    result = loop_event.result
+        current_plan: ExecutionPlan | None = None
+        with Live(
+            _build_display_markdown(full_text, current_plan),
+            console=console,
+            refresh_per_second=15,
+        ) as live:
+            self._active_live = live
+            try:
+                async for loop_event in self.runner.run_turn(
+                    history=self.contents,
+                    user_query=user_query,
+                    permission_check=self.permission_check,
+                ):
+                    if loop_event.plan is not None:
+                        current_plan = loop_event.plan
+
+                    if loop_event.type == "text.delta":
+                        full_text += loop_event.text
+                        live.update(_build_display_markdown(full_text, current_plan))
+                    elif loop_event.type == "plan.updated":
+                        live.update(
+                            _build_display_markdown(
+                                full_text,
+                                current_plan,
+                                f"{_phase_label(loop_event.phase)}：执行计划已更新..",
+                            )
+                        )
+                    elif loop_event.type == "tool.requested":
+                        live.update(
+                            _build_display_markdown(
+                                full_text,
+                                current_plan,
+                                f"{_phase_label(loop_event.phase)}：模型调用工具 `{loop_event.tool_name}` 中..",
+                            )
+                        )
+                    elif loop_event.type in {"run.completed", "run.failed"}:
+                        result = loop_event.result
+                        if result and result.plan is not None:
+                            current_plan = result.plan
+                        live.update(_build_display_markdown(full_text, current_plan))
+            finally:
+                self._active_live = None
 
         if result:
             self.contents = result.history
@@ -54,11 +104,16 @@ class App:
                 console.print("[yellow]代理陷入死循环[/yellow]")
 
     async def permission_check(self, request: ToolApprovalRequest) -> bool:
-        console.print(
-            "\n[red]⚠️ 警告：大模型申请执行危险写入工具 "
-            f"`{request.tool_name}`[/red]"
-        )
-        console.print(f"[yellow]执行参数：{request.arguments}[/yellow]")
+        if self._active_live is not None:
+            self._active_live.stop()
+        try:
+            console.print(
+                f"\n[red]⚠️ 警告：大模型申请执行危险写入工具 `{request.tool_name}`[/red]"
+            )
+            console.print(f"[yellow]执行参数：{request.arguments}[/yellow]")
 
-        answer: str = await self.session.prompt_async("是否允许执行？(y/n) > ")
-        return answer.strip().lower() == "y"
+            answer: str = await self.session.prompt_async("是否允许执行？(y/n) > ")
+            return answer.strip().lower() == "y"
+        finally:
+            if self._active_live is not None:
+                self._active_live.start()
