@@ -5,6 +5,7 @@ from google.genai import types
 from agent_service.tools.base import Tool
 from agent_service.tools.edit_file import EditFileTool
 from agent_service.tools.list_files import ListFilesTool
+from agent_service.tools.plan_tool import UpdatePlanTool
 from agent_service.tools.quality_check import QualityCheckTool
 from agent_service.tools.read_file import ReadFileTool
 from agent_service.tools.run_command import RunCommandTool
@@ -22,6 +23,7 @@ ALL_TOOLS: list[Tool] = [
     EditFileTool(),
     LoadYamlTool(),
     RunCommandTool(),
+    UpdatePlanTool(),
 ]
 
 TOOL_REGISTRY: dict[str, Tool] = {tool.name: tool for tool in ALL_TOOLS}

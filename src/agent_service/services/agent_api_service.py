@@ -655,6 +655,9 @@ class AgentAPIService:
                         asyncio.get_running_loop().time() - wait_started
                     )
 
+                if event.type == "plan.updated":
+                    continue
+
                 approval_expires_at: datetime | None = None
                 sequence += 1
                 if event.type == "tool.requested":

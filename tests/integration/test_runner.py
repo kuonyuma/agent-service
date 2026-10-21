@@ -61,3 +61,77 @@ async def test_runner_returns_new_history_without_modifying_input(monkeypatch):
     assert user_parts[0].text == "新问题"
     assert events[-1].result.usage == {"input_len": 12, "output_len": 2}
     assert received_system_prompt == "仅允许只读工具"
+
+
+@pytest.mark.asyncio
+async def test_runner_injects_plan_progress_into_executing_turn_prompt(monkeypatch):
+    received_prompts: list[str] = []
+    call_count = 0
+
+    async def fake_stream_message(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        received_prompts.append(kwargs["system_prompt"])
+        if call_count == 1:
+            yield StreamEvent(
+                type="message_done",
+                result=StreamResult(
+                    contents="",
+                    stop_reason="tool_use",
+                    usage={"input_len": 10, "output_len": 5},
+                    function_calls=[
+                        types.FunctionCall(
+                            name="update_plan",
+                            args={
+                                "action": "create",
+                                "goal": "验证 Runner 计划注入",
+                                "steps": [
+                                    {
+                                        "id": "step-1",
+                                        "title": "第一步直接完成",
+                                        "status": "completed",
+                                    }
+                                ],
+                            },
+                        )
+                    ],
+                ),
+            )
+        else:
+            yield StreamEvent(
+                type="message_done",
+                result=StreamResult(
+                    contents="执行完毕",
+                    stop_reason="STOP",
+                    usage={"input_len": 15, "output_len": 4},
+                    raw_parts=[types.Part.from_text(text="执行完毕")],
+                ),
+            )
+
+    monkeypatch.setattr(
+        agent_service.core.agentic_loop,
+        "stream_message",
+        fake_stream_message,
+    )
+    runner = AgentRunner(tools=[], system_prompt="基础系统提示词")
+
+    events = [
+        event
+        async for event in runner.run_turn(
+            history=[],
+            user_query="请按计划执行",
+        )
+    ]
+
+    assert [event.type for event in events] == [
+        "tool.requested",
+        "tool.completed",
+        "plan.updated",
+        "run.completed",
+    ]
+    assert received_prompts[0] == "基础系统提示词"
+    assert "当前执行计划状态" in received_prompts[1]
+    assert "验证 Runner 计划注入" in received_prompts[1]
+    assert events[-1].result is not None
+    assert events[-1].result.plan is not None
+    assert events[-1].result.plan.is_completed()
