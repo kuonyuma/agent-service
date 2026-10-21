@@ -179,42 +179,43 @@ async def query(
     usage = {"input_len": 0, "output_len": 0}
     completed_turns = 0
 
-    base_registry = (
+    base_registry = (# 准备基础工具
         dict(tool_registry) if tool_registry is not None else dict(TOOL_REGISTRY)
     )
-    use_plan_mode = (
+    use_plan_mode = ( # 启动plan
         plan_and_execute
         and "update_plan" in base_registry
         and (allowed_tool_names is None or "update_plan" in allowed_tool_names)
     )
-    plan_state = ExecutionPlan(
+    plan_state = ExecutionPlan( # 创建状态机
         phase="planning" if use_plan_mode else "executing"
     )
-    if "update_plan" in base_registry:
+
+    if "update_plan" in base_registry: # 将状态机的使用权交给工具函数
         base_registry["update_plan"] = UpdatePlanTool(plan_state)
-    active_registry: ToolRegistry = base_registry
+    active_registry: ToolRegistry = base_registry# 拿到新的基础工具
 
     base_system_prompt = (
         system_prompt if system_prompt is not None else settings.system_prompt
     )
+    
     completion_reminder_sent = False
-
     try:
         for turn in range(1, max_turns + 1):
             completed_turns = turn
             current_phase = plan_state.phase
             turn_tools = (
-                _filter_planning_tools(tools, active_registry)
+                _filter_planning_tools(tools, active_registry)  # 过滤工具
                 if use_plan_mode and current_phase == "planning"
                 else tools
             )
-            turn_system_prompt = _build_turn_system_prompt(
+            turn_system_prompt = _build_turn_system_prompt( #构建新的系统提示词
                 base_system_prompt,
                 plan_state,
             )
 
             result: StreamResult | None = None
-            async for event in stream_message(
+            async for event in stream_message( # 请求llm
                 contents=history,
                 tools=turn_tools,
                 system_prompt=turn_system_prompt,
@@ -225,9 +226,9 @@ async def query(
                         type="text.delta",
                         text=event.text,
                         turn=turn,
-                        phase=plan_state.phase,
-                        plan=(
-                            plan_state.snapshot() if plan_state.steps else None
+                        phase=plan_state.phase, # 交代当前的状态
+                        plan=( # 返回copy状态机信息
+                            plan_state.snapshot() if plan_state.steps else None 
                         ),
                     )
                 elif event.type == "message_done":
@@ -241,7 +242,7 @@ async def query(
             history.append(types.Content(role="model", parts=result.raw_parts))
 
             if not result.function_calls:
-                if (
+                if ( # 防止大模型提前提交没有完成的状态
                     use_plan_mode
                     and plan_state.phase == "executing"
                     and plan_state.has_unfinished_steps()
@@ -280,9 +281,9 @@ async def query(
                         plan=plan_state,
                     ),
                 )
-                return
+                return #一次agent运行结束
 
-            named_calls: list[
+            named_calls: list[ # 待执行工具的名单
                 tuple[
                     str,
                     str,
@@ -291,6 +292,7 @@ async def query(
                     bool,
                 ]
             ] = []
+
             for function_call in result.function_calls:
                 name = function_call.name
                 if not name:
@@ -298,12 +300,12 @@ async def query(
                 call_id = function_call.id or str(uuid7())
                 function_call.id = call_id
                 arguments = dict(function_call.args or {})
-                tool = active_registry.get(name)
-                blocked_by_planning = bool(
+                tool = active_registry.get(name) # 拿到工具实例
+                blocked_by_planning = bool( # 防止模型在plan阶段调用写入工具
                     use_plan_mode
-                    and current_phase == "planning"
+                    and current_phase == "planning" # 如果是规划状态
                     and tool is not None
-                    and not tool.read_only
+                    and not tool.read_only # 如果存在可写入工具
                 )
                 requires_approval = bool(
                     not blocked_by_planning
@@ -349,7 +351,7 @@ async def query(
                 function_call,
                 approval_request,
                 blocked_by_planning,
-            ) in named_calls:
+            ) in named_calls: # 开始遍历可调用工具
                 if blocked_by_planning:
                     blocked_result = ToolResult(
                         content=(
@@ -384,7 +386,7 @@ async def query(
                     if allowed:
                         approved_call_ids = frozenset({call_id})
 
-                batch = await execute_tools(
+                batch = await execute_tools( # 正式调用工具
                     [function_call],
                     allowed_tool_names=allowed_tool_names,
                     approved_tool_call_ids=approved_call_ids,
