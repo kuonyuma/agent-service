@@ -19,6 +19,7 @@ from agent_service.tools.base import Tool, ToolResult
 from agent_service.tools.executor import execute_tools, tool_result_part
 from agent_service.tools.index import TOOL_REGISTRY
 from agent_service.tools.plan_tool import UpdatePlanTool
+from agent_service.tools.reflect_tool import ReflectTool
 
 ToolRegistry = Mapping[str, Tool]
 
@@ -61,6 +62,7 @@ PermissionCheck = Callable[[ToolApprovalRequest], Awaitable[bool]]
 LoopEventType = Literal[
     "text.delta",
     "plan.updated",
+    "reflection.updated",
     "tool.requested",
     "tool.approval_required",
     "tool.completed",
@@ -122,15 +124,15 @@ def _run_result(
         turns=turns,
         usage=dict(usage),
         error=error,
-        plan=plan.snapshot() if plan is not None and plan.steps else None,
+        plan=plan.snapshot() if plan is not None and plan.has_state() else None,
     )
 
 
-def _filter_planning_tools(
+def _filter_planning_tools( # 工具过滤器
     tools: list[types.Tool],
     registry: ToolRegistry,
 ) -> list[types.Tool]:
-    """在规划阶段仅向模型暴露 read_only 工具（含 update_plan）。"""
+    """在只读阶段（planning / reflecting）仅向模型暴露 read_only 工具（含 update_plan 与 reflect）。"""
 
     filtered: list[types.Tool] = []
     for tool_group in tools:
@@ -155,11 +157,19 @@ def _build_turn_system_prompt(
     base_prompt: str,
     plan_state: ExecutionPlan,
 ) -> str:
-    """在执行阶段将最新计划状态注入系统提示词。"""
+    """在执行或反思阶段将最新计划与反思状态注入系统提示词。"""
 
-    if not plan_state.steps:
+    if not plan_state.has_state():
         return base_prompt
-    return f"{base_prompt}\n\n## 当前执行计划状态\n{plan_state.format_markdown()}"
+    prompt = f"{base_prompt}\n\n## 当前执行计划状态\n{plan_state.format_markdown()}"
+    if plan_state.phase == "reflecting":
+        prompt += (
+            "\n\n## 反思阶段指令（Reflecting）\n"
+            "当前处于只读反思阶段，修改与命令类工具已临时锁定。"
+            "请先使用只读工具检查上下文（如需），并调用 `reflect` 工具提交故障根因或交付自检分析"
+            "（或调用 `update_plan(action='replan', ...)` 动态调整计划），恢复至 `executing` 阶段后再执行修改操作。"
+        )
+    return prompt
 
 
 async def query(
@@ -187,12 +197,19 @@ async def query(
         and "update_plan" in base_registry
         and (allowed_tool_names is None or "update_plan" in allowed_tool_names)
     )
+    use_reflection_mode = (
+        plan_and_execute
+        and "reflect" in base_registry
+        and (allowed_tool_names is None or "reflect" in allowed_tool_names)
+    )
     plan_state = ExecutionPlan( # 创建状态机
         phase="planning" if use_plan_mode else "executing"
     )
 
     if "update_plan" in base_registry: # 将状态机的使用权交给工具函数
         base_registry["update_plan"] = UpdatePlanTool(plan_state)
+    if "reflect" in base_registry:
+        base_registry["reflect"] = ReflectTool(plan_state)
     active_registry: ToolRegistry = base_registry# 拿到新的基础工具
 
     base_system_prompt = (
@@ -200,13 +217,17 @@ async def query(
     )
     
     completion_reminder_sent = False
+    reflection_reminder_sent = False
     try:
         for turn in range(1, max_turns + 1):
             completed_turns = turn
-            current_phase = plan_state.phase
-            turn_tools = (
-                _filter_planning_tools(tools, active_registry)  # 过滤工具
-                if use_plan_mode and current_phase == "planning"
+            current_phase = plan_state.phase # 如果处于planing or reflection阶段就过滤工具只提供read-lonly
+            turn_tools = ( # 如果处于 
+                _filter_planning_tools(tools, active_registry)  
+                if (
+                    (use_plan_mode and current_phase == "planning")
+                    or (use_reflection_mode and current_phase == "reflecting")
+                )
                 else tools
             )
             turn_system_prompt = _build_turn_system_prompt( #构建新的系统提示词
@@ -228,7 +249,9 @@ async def query(
                         turn=turn,
                         phase=plan_state.phase, # 交代当前的状态
                         plan=( # 返回copy状态机信息
-                            plan_state.snapshot() if plan_state.steps else None 
+                            plan_state.snapshot()
+                            if plan_state.has_state()
+                            else None
                         ),
                     )
                 elif event.type == "message_done":
@@ -241,7 +264,31 @@ async def query(
             usage["output_len"] += _usage_value(result.usage, "output_len")
             history.append(types.Content(role="model", parts=result.raw_parts))
 
-            if not result.function_calls:
+            if not result.function_calls: # 模型打算结束这次任务
+                if ( # 如果使用反思功能且处于反思状态，并且还未纠正过，且还可以循环，就触发反思提醒
+                    use_reflection_mode
+                    and plan_state.phase == "reflecting"
+                    and not reflection_reminder_sent
+                    and turn < max_turns
+                ):
+                    reflection_reminder_sent = True
+                    history.append(
+                        types.Content(
+                            role="user",
+                            parts=[
+                                types.Part.from_text(
+                                    text=(
+                                        "[系统反思提醒] 当前处于反思阶段（reflecting），尚有待处理的反思事项：\n"
+                                        f"{plan_state.format_markdown()}\n\n"
+                                        "请先调用 `reflect` 工具提交故障根因或交付自检分析（retry/replan/verify/complete），"
+                                        "恢复至执行阶段并完成必要操作后再给出最终总结。"
+                                    )
+                                )
+                            ],
+                        )
+                    )
+                    continue
+
                 if ( # 防止大模型提前提交没有完成的状态
                     use_plan_mode
                     and plan_state.phase == "executing"
@@ -267,11 +314,50 @@ async def query(
                     )
                     continue
 
+                if (
+                    use_reflection_mode
+                    and plan_state.phase == "executing"
+                    and plan_state.needs_verification()
+                    and not reflection_reminder_sent
+                    and turn < max_turns
+                ):
+                    reflection_reminder_sent = True
+                    edited_targets = ", ".join(plan_state.unverified_edits)
+                    plan_state.enter_reflection(
+                        reason=(
+                            f"已编辑文件 ({edited_targets})，但在结束任务前尚未读取确认、"
+                            "运行质量检查或提交终局交付反思。"
+                        ),
+                        trigger="verification",
+                    )
+                    yield LoopEvent(
+                        type="reflection.updated",
+                        turn=turn,
+                        phase=plan_state.phase,
+                        plan=plan_state.snapshot(),
+                    )
+                    history.append(
+                        types.Content(
+                            role="user",
+                            parts=[
+                                types.Part.from_text(
+                                    text=(
+                                        "[系统反思提醒] 检测到你已修改代码文件，但在交付前尚未进行验证或终局自检：\n"
+                                        f"{plan_state.format_markdown()}\n\n"
+                                        "请先使用 `read_file` 或质量检查工具核对修改结果，并调用 "
+                                        "`reflect(strategy='complete', ...)` 完成终局自检后再给出最终总结。"
+                                    )
+                                )
+                            ],
+                        )
+                    )
+                    continue
+
                 yield LoopEvent(
                     type="run.completed",
                     turn=turn,
                     phase=plan_state.phase,
-                    plan=plan_state.snapshot() if plan_state.steps else None,
+                    plan=plan_state.snapshot() if plan_state.has_state() else None,
                     result=_run_result(
                         reason="completed",
                         history=history,
@@ -289,7 +375,7 @@ async def query(
                     str,
                     types.FunctionCall,
                     ToolApprovalRequest | None,
-                    bool,
+                    Literal["planning", "reflecting"] | None,
                 ]
             ] = []
 
@@ -301,14 +387,14 @@ async def query(
                 function_call.id = call_id
                 arguments = dict(function_call.args or {})
                 tool = active_registry.get(name) # 拿到工具实例
-                blocked_by_planning = bool( # 防止模型在plan阶段调用写入工具
-                    use_plan_mode
-                    and current_phase == "planning" # 如果是规划状态
-                    and tool is not None
-                    and not tool.read_only # 如果存在可写入工具
-                )
+                blocked_phase: Literal["planning", "reflecting"] | None = None
+                if tool is not None and not tool.read_only:
+                    if use_plan_mode and current_phase == "planning":
+                        blocked_phase = "planning"
+                    elif use_reflection_mode and current_phase == "reflecting":
+                        blocked_phase = "reflecting"
                 requires_approval = bool(
-                    not blocked_by_planning
+                    blocked_phase is None
                     and tool is not None
                     and not tool.read_only
                     and (
@@ -327,14 +413,14 @@ async def query(
                         name,
                         function_call,
                         approval_request,
-                        blocked_by_planning,
+                        blocked_phase,
                     )
                 )
                 yield LoopEvent(
                     type="tool.requested",
                     turn=turn,
                     phase=plan_state.phase,
-                    plan=plan_state.snapshot() if plan_state.steps else None,
+                    plan=plan_state.snapshot() if plan_state.has_state() else None,
                     tool_call_id=call_id,
                     tool_name=name,
                     tool_arguments=arguments,
@@ -350,22 +436,36 @@ async def query(
                 name,
                 function_call,
                 approval_request,
-                blocked_by_planning,
+                blocked_phase,
             ) in named_calls: # 开始遍历可调用工具
-                if blocked_by_planning:
-                    blocked_result = ToolResult(
-                        content=(
+                if blocked_phase is not None:
+                    if blocked_phase == "planning":
+                        blocked_msg = (
                             f"当前处于只读规划阶段（planning），禁止直接执行修改或命令工具 `{name}`。"
                             "请先使用只读工具探索上下文，并调用 `update_plan(action='create', ...)` "
                             "创建执行计划，进入执行阶段（executing）后再执行该操作。"
-                        ),
+                        )
+                    else:
+                        reason_text = (
+                            plan_state.pending_reflection_reason
+                            or "前序操作出现异常或需要交付自检"
+                        )
+                        blocked_msg = (
+                            f"当前处于只读反思阶段（reflecting），禁止直接执行修改或命令工具 `{name}`。"
+                            f"待反思原因：{reason_text}。"
+                            "请先使用只读工具检查上下文，并调用 `reflect` 工具分析根因与下一步策略"
+                            "（或调用 `update_plan(action='replan', ...)` 动态重规划），"
+                            "恢复至执行阶段（executing）后再执行该操作。"
+                        )
+                    blocked_result = ToolResult(
+                        content=blocked_msg,
                         is_error=True,
                     )
                     yield LoopEvent(
                         type="tool.completed",
                         turn=turn,
                         phase=plan_state.phase,
-                        plan=plan_state.snapshot() if plan_state.steps else None,
+                        plan=plan_state.snapshot() if plan_state.has_state() else None,
                         tool_call_id=call_id,
                         tool_name=name,
                         tool_arguments=dict(function_call.args or {}),
@@ -377,6 +477,7 @@ async def query(
                     continue
 
                 approved_call_ids: frozenset[str] = frozenset()
+                denied_by_user = False
                 if approval_request is not None:
                     allowed = (
                         await permission_check(approval_request)
@@ -385,6 +486,8 @@ async def query(
                     )
                     if allowed:
                         approved_call_ids = frozenset({call_id})
+                    else:
+                        denied_by_user = True
 
                 batch = await execute_tools( # 正式调用工具
                     [function_call],
@@ -397,7 +500,7 @@ async def query(
                         type="tool.completed",
                         turn=turn,
                         phase=plan_state.phase,
-                        plan=plan_state.snapshot() if plan_state.steps else None,
+                        plan=plan_state.snapshot() if plan_state.has_state() else None,
                         tool_call_id=execution.call_id,
                         tool_name=execution.name,
                         tool_arguments=execution.arguments,
@@ -409,6 +512,47 @@ async def query(
                     ):
                         yield LoopEvent(
                             type="plan.updated",
+                            turn=turn,
+                            phase=plan_state.phase,
+                            plan=plan_state.snapshot(),
+                        )
+                    elif (
+                        execution.name == "reflect"
+                        and not execution.result.is_error
+                    ):
+                        yield LoopEvent(
+                            type="reflection.updated",
+                            turn=turn,
+                            phase=plan_state.phase,
+                            plan=plan_state.snapshot(),
+                        )
+                    elif not execution.result.is_error:
+                        if execution.name == "edit_file":
+                            plan_state.record_edit(
+                                str(execution.arguments.get("path", ""))
+                            )
+                        elif execution.name in {
+                            "read_file",
+                            "quality_check",
+                            "run_command",
+                        }:
+                            plan_state.mark_verified()
+                    elif (
+                        use_reflection_mode
+                        and plan_state.phase == "executing"
+                        and execution.name not in {"update_plan", "reflect"}
+                        and not denied_by_user
+                    ):
+                        raw_err = execution.result.content.strip()
+                        first_line = (
+                            raw_err.splitlines()[0] if raw_err else "工具执行失败"
+                        )
+                        plan_state.enter_reflection(
+                            reason=f"工具 `{execution.name}` 执行报错：{first_line}",
+                            trigger="tool_error",
+                        )
+                        yield LoopEvent(
+                            type="reflection.updated",
                             turn=turn,
                             phase=plan_state.phase,
                             plan=plan_state.snapshot(),
@@ -425,7 +569,7 @@ async def query(
             type="run.failed",
             turn=max_turns,
             phase=plan_state.phase,
-            plan=plan_state.snapshot() if plan_state.steps else None,
+            plan=plan_state.snapshot() if plan_state.has_state() else None,
             result=_run_result(
                 reason="max_turns",
                 history=history,
@@ -441,7 +585,7 @@ async def query(
             type="run.failed",
             turn=completed_turns,
             phase=plan_state.phase,
-            plan=plan_state.snapshot() if plan_state.steps else None,
+            plan=plan_state.snapshot() if plan_state.has_state() else None,
             result=_run_result(
                 reason="error",
                 history=history,
@@ -458,7 +602,7 @@ async def query(
             type="run.failed",
             turn=completed_turns,
             phase=plan_state.phase,
-            plan=plan_state.snapshot() if plan_state.steps else None,
+            plan=plan_state.snapshot() if plan_state.has_state() else None,
             result=_run_result(
                 reason="error",
                 history=history,

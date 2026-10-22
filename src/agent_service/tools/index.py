@@ -8,6 +8,7 @@ from agent_service.tools.list_files import ListFilesTool
 from agent_service.tools.plan_tool import UpdatePlanTool
 from agent_service.tools.quality_check import QualityCheckTool
 from agent_service.tools.read_file import ReadFileTool
+from agent_service.tools.reflect_tool import ReflectTool
 from agent_service.tools.run_command import RunCommandTool
 from agent_service.tools.workspace import WorkspacePathPolicy
 from agent_service.tools.write_file import WriteFileTool
@@ -24,6 +25,7 @@ ALL_TOOLS: list[Tool] = [
     LoadYamlTool(),
     RunCommandTool(),
     UpdatePlanTool(),
+    ReflectTool(),
 ]
 
 TOOL_REGISTRY: dict[str, Tool] = {tool.name: tool for tool in ALL_TOOLS}

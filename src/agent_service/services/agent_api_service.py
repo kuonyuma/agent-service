@@ -655,7 +655,7 @@ class AgentAPIService:
                         asyncio.get_running_loop().time() - wait_started
                     )
 
-                if event.type == "plan.updated":
+                if event.type in {"plan.updated", "reflection.updated"}:
                     continue
 
                 approval_expires_at: datetime | None = None

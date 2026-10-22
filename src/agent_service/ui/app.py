@@ -18,7 +18,7 @@ def _build_display_markdown(
     status_hint: str = "",
 ) -> Markdown:
     sections: list[str] = []
-    if plan is not None and plan.steps:
+    if plan is not None and plan.has_state():
         sections.append(plan.format_markdown())
     if full_text:
         sections.append(full_text)
@@ -28,7 +28,11 @@ def _build_display_markdown(
 
 
 def _phase_label(phase: AgentPhase) -> str:
-    return "🔍 规划阶段" if phase == "planning" else "⚙️ 执行阶段"
+    if phase == "planning":
+        return "🔍 规划阶段"
+    if phase == "reflecting":
+        return "🤔 反思阶段"
+    return "⚙️ 执行阶段"
 
 
 class App:
@@ -77,6 +81,14 @@ class App:
                                 full_text,
                                 current_plan,
                                 f"{_phase_label(loop_event.phase)}：执行计划已更新..",
+                            )
+                        )
+                    elif loop_event.type == "reflection.updated":
+                        live.update(
+                            _build_display_markdown(
+                                full_text,
+                                current_plan,
+                                f"{_phase_label(loop_event.phase)}：反思状态已更新..",
                             )
                         )
                     elif loop_event.type == "tool.requested":
