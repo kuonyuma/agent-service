@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 import ntpath
 import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
+
+_FILE_LOCKS: dict[Path, asyncio.Lock] = {}
+
+
+def get_file_lock(path: Path) -> asyncio.Lock:
+    """获取指定文件路径的进程内异步互斥锁，防止并发子代理同时修改同一文件。"""
+
+    try:
+        key = path.resolve()
+    except OSError:
+        key = path
+    lock = _FILE_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _FILE_LOCKS[key] = lock
+    return lock
 
 
 class WorkspacePathError(ValueError):

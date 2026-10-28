@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -10,16 +11,18 @@ from google.genai import types
 from agent_service.client.stream_message import StreamResult, stream_message
 from agent_service.config.settings import settings
 from agent_service.core.plan import AgentPhase, ExecutionPlan
+from agent_service.core.subagent import SubagentManager
 from agent_service.errors import (
     AgentRuntimeError,
     AgentServiceError,
     InvalidToolCallError,
 )
 from agent_service.tools.base import Tool, ToolResult
-from agent_service.tools.executor import execute_tools, tool_result_part
+from agent_service.tools.executor import ToolExecution, execute_tools, tool_result_part
 from agent_service.tools.index import TOOL_REGISTRY
 from agent_service.tools.plan_tool import UpdatePlanTool
 from agent_service.tools.reflect_tool import ReflectTool
+from agent_service.tools.subagent_tool import SubagentTool
 
 ToolRegistry = Mapping[str, Tool]
 
@@ -107,6 +110,20 @@ def _usage_value(usage: dict[str, Any], key: str) -> int:
     return value if isinstance(value, int) else 0
 
 
+def _merged_usage(
+    usage: dict[str, int],
+    subagent_manager: SubagentManager | None,
+) -> dict[str, int]:
+    if subagent_manager is None:
+        return dict(usage)
+    return {
+        "input_len": usage.get("input_len", 0)
+        + subagent_manager.total_usage.get("input_len", 0),
+        "output_len": usage.get("output_len", 0)
+        + subagent_manager.total_usage.get("output_len", 0),
+    }
+
+
 def _run_result(
     *,
     reason: Literal["completed", "max_turns", "error"],
@@ -181,6 +198,9 @@ async def query(
     system_prompt: str | None = None,
     max_turns: int = 10,
     plan_and_execute: bool = True,
+    graceful_final_turn: bool = False,
+    inbox: asyncio.Queue[str] | None = None,
+    subagent_manager: SubagentManager | None = None,
 ) -> AsyncGenerator[LoopEvent]:
     """运行 Plan-and-Execute Agent 循环，不修改调用方传入的历史列表。"""
 
@@ -210,30 +230,93 @@ async def query(
         base_registry["update_plan"] = UpdatePlanTool(plan_state)
     if "reflect" in base_registry:
         base_registry["reflect"] = ReflectTool(plan_state)
-    active_registry: ToolRegistry = base_registry# 拿到新的基础工具
 
     base_system_prompt = (
         system_prompt if system_prompt is not None else settings.system_prompt
     )
-    
+
+    forwarded_events: asyncio.Queue[tuple[LoopEvent, asyncio.Event] | None] = (
+        asyncio.Queue()
+    )
+
+    async def _forward_subagent_event(sub_event: LoopEvent) -> None:
+        ack = asyncio.Event()
+        await forwarded_events.put((sub_event, ack))
+        await ack.wait()
+
+    active_subagent_manager: SubagentManager | None = subagent_manager
+    owns_subagent_manager = False
+    if "subagent" in base_registry:
+        if active_subagent_manager is None:
+            active_subagent_manager = SubagentManager(
+                base_registry,
+                parent_allowed_tool_names=allowed_tool_names,
+                parent_system_prompt=base_system_prompt,
+                parent_plan=plan_state,
+                permission_check=permission_check,
+                event_forwarder=_forward_subagent_event,
+                query_runner=query,
+            )
+            owns_subagent_manager = True
+        base_registry["subagent"] = SubagentTool(active_subagent_manager)
+
+    active_registry: ToolRegistry = base_registry# 拿到新的基础工具
+
     completion_reminder_sent = False
     reflection_reminder_sent = False
     try:
         for turn in range(1, max_turns + 1):
             completed_turns = turn
+            if inbox is not None and not inbox.empty():
+                inbox_msgs: list[str] = []
+                while not inbox.empty():
+                    try:
+                        raw_msg = inbox.get_nowait()
+                        if isinstance(raw_msg, str) and raw_msg.strip():
+                            inbox_msgs.append(raw_msg.strip())
+                    except asyncio.QueueEmpty:
+                        break
+                if inbox_msgs:
+                    injected_text = "\n\n".join(
+                        f"[实时通信指令] {msg}" for msg in inbox_msgs
+                    )
+                    injected_part = types.Part.from_text(text=injected_text)
+                    if history and history[-1].role == "user":
+                        existing_parts = list(history[-1].parts or [])
+                        history[-1] = types.Content(
+                            role="user",
+                            parts=[*existing_parts, injected_part],
+                        )
+                    else:
+                        history.append(
+                            types.Content(role="user", parts=[injected_part])
+                        )
+
             current_phase = plan_state.phase # 如果处于planing or reflection阶段就过滤工具只提供read-lonly
-            turn_tools = ( # 如果处于 
-                _filter_planning_tools(tools, active_registry)  
-                if (
-                    (use_plan_mode and current_phase == "planning")
-                    or (use_reflection_mode and current_phase == "reflecting")
-                )
-                else tools
+            is_graceful_last_turn = (
+                graceful_final_turn and max_turns > 1 and turn == max_turns
             )
+            if is_graceful_last_turn:
+                turn_tools: list[types.Tool] = []
+            else:
+                turn_tools = ( # 如果处于 
+                    _filter_planning_tools(tools, active_registry)  
+                    if (
+                        (use_plan_mode and current_phase == "planning")
+                        or (use_reflection_mode and current_phase == "reflecting")
+                    )
+                    else tools
+                )
             turn_system_prompt = _build_turn_system_prompt( #构建新的系统提示词
                 base_system_prompt,
                 plan_state,
             )
+            if is_graceful_last_turn:
+                turn_system_prompt += (
+                    "\n\n## 最终轮总结指令（Final Turn）\n"
+                    "当前已到达子代理最大运行步数，工具调用已关闭。"
+                    "请立即基于目前已掌握的上下文、证据与已完成的操作，输出完整、精炼的最终总结报告。"
+                )
 
             result: StreamResult | None = None
             async for event in stream_message( # 请求llm
@@ -363,7 +446,7 @@ async def query(
                         history=history,
                         new_contents=history[initial_history_length:],
                         turns=turn,
-                        usage=usage,
+                        usage=_merged_usage(usage, active_subagent_manager),
                         plan=plan_state,
                     ),
                 )
@@ -430,12 +513,85 @@ async def query(
                     ),
                 )
 
+            approved_call_ids: set[str] = set()
+            denied_call_ids: set[str] = set()
+            executable_calls: list[types.FunctionCall] = []
+            for (
+                call_id,
+                _name,
+                function_call,
+                approval_request,
+                blocked_phase,
+            ) in named_calls:
+                if blocked_phase is not None:
+                    continue
+                if approval_request is not None:
+                    allowed = (
+                        await permission_check(approval_request)
+                        if permission_check is not None
+                        else False
+                    )
+                    if allowed:
+                        approved_call_ids.add(call_id)
+                    else:
+                        denied_call_ids.add(call_id)
+                executable_calls.append(function_call)
+
+            executions_by_id: dict[str, ToolExecution] = {}
+            if executable_calls:
+                exec_task = asyncio.create_task(
+                    execute_tools(
+                        executable_calls,
+                        allowed_tool_names=allowed_tool_names,
+                        approved_tool_call_ids=frozenset(approved_call_ids),
+                        tool_registry=active_registry,
+                    )
+                )
+                try:
+                    while not exec_task.done():
+                        queue_get_task = asyncio.create_task(
+                            forwarded_events.get()
+                        )
+                        done, _ = await asyncio.wait(
+                            {exec_task, queue_get_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if queue_get_task in done:
+                            item = queue_get_task.result()
+                            if item is not None:
+                                sub_event, ack = item
+                                yield sub_event
+                                ack.set()
+                        else:
+                            queue_get_task.cancel()
+                            try:
+                                await queue_get_task
+                            except asyncio.CancelledError:
+                                pass
+                    while not forwarded_events.empty():
+                        item = forwarded_events.get_nowait()
+                        if item is not None:
+                            sub_event, ack = item
+                            yield sub_event
+                            ack.set()
+                    batch = await exec_task
+                finally:
+                    if not exec_task.done():
+                        exec_task.cancel()
+                        try:
+                            await exec_task
+                        except asyncio.CancelledError:
+                            pass
+                executions_by_id = {
+                    ex.call_id: ex for ex in batch.executions
+                }
+
             tool_parts: list[types.Part] = []
             for (
                 call_id,
                 name,
                 function_call,
-                approval_request,
+                _approval_request,
                 blocked_phase,
             ) in named_calls: # 开始遍历可调用工具
                 if blocked_phase is not None:
@@ -476,89 +632,78 @@ async def query(
                     )
                     continue
 
-                approved_call_ids: frozenset[str] = frozenset()
-                denied_by_user = False
-                if approval_request is not None:
-                    allowed = (
-                        await permission_check(approval_request)
-                        if permission_check is not None
-                        else False
-                    )
-                    if allowed:
-                        approved_call_ids = frozenset({call_id})
-                    else:
-                        denied_by_user = True
-
-                batch = await execute_tools( # 正式调用工具
-                    [function_call],
-                    allowed_tool_names=allowed_tool_names,
-                    approved_tool_call_ids=approved_call_ids,
-                    tool_registry=active_registry,
+                execution = executions_by_id.get(call_id)
+                if execution is None:
+                    continue
+                denied_by_user = call_id in denied_call_ids
+                yield LoopEvent(
+                    type="tool.completed",
+                    turn=turn,
+                    phase=plan_state.phase,
+                    plan=plan_state.snapshot() if plan_state.has_state() else None,
+                    tool_call_id=execution.call_id,
+                    tool_name=execution.name,
+                    tool_arguments=execution.arguments,
+                    tool_result=execution.result,
                 )
-                for execution in batch.executions:
+                if (
+                    execution.name == "update_plan"
+                    and not execution.result.is_error
+                ):
                     yield LoopEvent(
-                        type="tool.completed",
+                        type="plan.updated",
                         turn=turn,
                         phase=plan_state.phase,
-                        plan=plan_state.snapshot() if plan_state.has_state() else None,
-                        tool_call_id=execution.call_id,
-                        tool_name=execution.name,
-                        tool_arguments=execution.arguments,
-                        tool_result=execution.result,
+                        plan=plan_state.snapshot(),
                     )
-                    if (
-                        execution.name == "update_plan"
-                        and not execution.result.is_error
-                    ):
-                        yield LoopEvent(
-                            type="plan.updated",
-                            turn=turn,
-                            phase=plan_state.phase,
-                            plan=plan_state.snapshot(),
+                elif (
+                    execution.name == "reflect"
+                    and not execution.result.is_error
+                ):
+                    yield LoopEvent(
+                        type="reflection.updated",
+                        turn=turn,
+                        phase=plan_state.phase,
+                        plan=plan_state.snapshot(),
+                    )
+                elif not execution.result.is_error:
+                    if execution.name == "edit_file":
+                        plan_state.record_edit(
+                            str(execution.arguments.get("path", ""))
                         )
-                    elif (
-                        execution.name == "reflect"
-                        and not execution.result.is_error
-                    ):
-                        yield LoopEvent(
-                            type="reflection.updated",
-                            turn=turn,
-                            phase=plan_state.phase,
-                            plan=plan_state.snapshot(),
-                        )
-                    elif not execution.result.is_error:
-                        if execution.name == "edit_file":
-                            plan_state.record_edit(
-                                str(execution.arguments.get("path", ""))
-                            )
-                        elif execution.name in {
-                            "read_file",
-                            "quality_check",
-                            "run_command",
-                        }:
-                            plan_state.mark_verified()
-                    elif (
-                        use_reflection_mode
-                        and plan_state.phase == "executing"
-                        and execution.name not in {"update_plan", "reflect"}
-                        and not denied_by_user
-                    ):
-                        raw_err = execution.result.content.strip()
-                        first_line = (
-                            raw_err.splitlines()[0] if raw_err else "工具执行失败"
-                        )
-                        plan_state.enter_reflection(
-                            reason=f"工具 `{execution.name}` 执行报错：{first_line}",
-                            trigger="tool_error",
-                        )
-                        yield LoopEvent(
-                            type="reflection.updated",
-                            turn=turn,
-                            phase=plan_state.phase,
-                            plan=plan_state.snapshot(),
-                        )
-                if batch.content.parts:
-                    tool_parts.extend(batch.content.parts)
+                    elif execution.name in {
+                        "read_file",
+                        "quality_check",
+                        "run_command",
+                    }:
+                        plan_state.mark_verified()
+                elif (
+                    use_reflection_mode
+                    and plan_state.phase == "executing"
+                    and execution.name not in {"update_plan", "reflect"}
+                    and not denied_by_user
+                ):
+                    raw_err = execution.result.content.strip()
+                    first_line = (
+                        raw_err.splitlines()[0] if raw_err else "工具执行失败"
+                    )
+                    plan_state.enter_reflection(
+                        reason=f"工具 `{execution.name}` 执行报错：{first_line}",
+                        trigger="tool_error",
+                    )
+                    yield LoopEvent(
+                        type="reflection.updated",
+                        turn=turn,
+                        phase=plan_state.phase,
+                        plan=plan_state.snapshot(),
+                    )
+                tool_parts.append(
+                    tool_result_part(
+                        execution.name,
+                        execution.result,
+                        execution.call_id,
+                    )
+                )
 
             history.append(types.Content(role="user", parts=tool_parts))
 
@@ -575,7 +720,7 @@ async def query(
                 history=history,
                 new_contents=history[initial_history_length:],
                 turns=max_turns,
-                usage=usage,
+                usage=_merged_usage(usage, active_subagent_manager),
                 error=max_turns_error,
                 plan=plan_state,
             ),
@@ -591,7 +736,7 @@ async def query(
                 history=history,
                 new_contents=history[initial_history_length:],
                 turns=completed_turns,
-                usage=usage,
+                usage=_merged_usage(usage, active_subagent_manager),
                 error=exc,
                 plan=plan_state,
             ),
@@ -608,8 +753,11 @@ async def query(
                 history=history,
                 new_contents=history[initial_history_length:],
                 turns=completed_turns,
-                usage=usage,
+                usage=_merged_usage(usage, active_subagent_manager),
                 error=runtime_error,
                 plan=plan_state,
             ),
         )
+    finally:
+        if owns_subagent_manager and active_subagent_manager is not None:
+            await active_subagent_manager.close()

@@ -1,3 +1,5 @@
+import asyncio
+
 from google.genai import types
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -41,6 +43,7 @@ class App:
         self.session = PromptSession()
         self.runner = runner or AgentRunner()
         self._active_live: Live | None = None
+        self._approval_lock = asyncio.Lock()
 
     async def run(self):
 
@@ -92,11 +95,18 @@ class App:
                             )
                         )
                     elif loop_event.type == "tool.requested":
+                        if loop_event.tool_name == "subagent":
+                            args = loop_event.tool_arguments
+                            role = args.get("role") or args.get("agent_id") or "explorer"
+                            desc = args.get("description") or args.get("action") or "协同执行"
+                            hint = f"{_phase_label(loop_event.phase)}：🤖 子代理 `{role}`（{desc}）运行中.."
+                        else:
+                            hint = f"{_phase_label(loop_event.phase)}：模型调用工具 `{loop_event.tool_name}` 中.."
                         live.update(
                             _build_display_markdown(
                                 full_text,
                                 current_plan,
-                                f"{_phase_label(loop_event.phase)}：模型调用工具 `{loop_event.tool_name}` 中..",
+                                hint,
                             )
                         )
                     elif loop_event.type in {"run.completed", "run.failed"}:
@@ -116,16 +126,17 @@ class App:
                 console.print("[yellow]代理陷入死循环[/yellow]")
 
     async def permission_check(self, request: ToolApprovalRequest) -> bool:
-        if self._active_live is not None:
-            self._active_live.stop()
-        try:
-            console.print(
-                f"\n[red]⚠️ 警告：大模型申请执行危险写入工具 `{request.tool_name}`[/red]"
-            )
-            console.print(f"[yellow]执行参数：{request.arguments}[/yellow]")
-
-            answer: str = await self.session.prompt_async("是否允许执行？(y/n) > ")
-            return answer.strip().lower() == "y"
-        finally:
+        async with self._approval_lock:
             if self._active_live is not None:
-                self._active_live.start()
+                self._active_live.stop()
+            try:
+                console.print(
+                    f"\n[red]⚠️ 警告：大模型申请执行危险写入工具 `{request.tool_name}`[/red]"
+                )
+                console.print(f"[yellow]执行参数：{request.arguments}[/yellow]")
+
+                answer: str = await self.session.prompt_async("是否允许执行？(y/n) > ")
+                return answer.strip().lower() == "y"
+            finally:
+                if self._active_live is not None:
+                    self._active_live.start()

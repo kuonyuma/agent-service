@@ -3,7 +3,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from agent_service.tools.base import Tool, ToolResult
-from agent_service.tools.workspace import WorkspacePathError, WorkspacePathPolicy
+from agent_service.tools.workspace import (
+    WorkspacePathError,
+    WorkspacePathPolicy,
+    get_file_lock,
+)
 
 
 class EditFileTool(Tool):
@@ -51,35 +55,50 @@ class EditFileTool(Tool):
                     path_str,
                     expected="file",
                 )
-                file_text = await asyncio.to_thread(
-                    self.workspace_policy.read_text,
-                    path,
-                )
             except WorkspacePathError as exc:
                 return ToolResult(content=f"修改文件被拒绝：{exc}", is_error=True)
         else:
             path = Path(path_str).resolve()
-
             if not path.exists():
                 content = "路径不存在"
                 return ToolResult(content=content, is_error=True)
-            file_text = path.read_text(encoding="utf-8")
 
-        count = file_text.count(old_str)
+        async with get_file_lock(path):
+            if self.workspace_policy is not None:
+                try:
+                    file_text = await asyncio.to_thread(
+                        self.workspace_policy.read_text,
+                        path,
+                    )
+                except WorkspacePathError as exc:
+                    return ToolResult(content=f"修改文件被拒绝：{exc}", is_error=True)
+            else:
+                if not path.exists():
+                    return ToolResult(content="路径不存在", is_error=True)
+                file_text = await asyncio.to_thread(
+                    path.read_text,
+                    encoding="utf-8",
+                )
 
-        if count > 1:
-            content = f"被修改字符串{old_str}在文中出现{count}次，无法修改"
-            return ToolResult(content=content, is_error=True)
-        if count == 0:
-            content = f"未找到被修改字符串{old_str}，无法修改"
-            return ToolResult(content=content, is_error=True)
-        result = file_text.replace(old_str, new_str)
-        if self.workspace_policy is not None:
-            try:
-                self.workspace_policy.validate_write_content(result)
-                await asyncio.to_thread(path.write_text, result, encoding="utf-8")
-            except (WorkspacePathError, OSError, UnicodeEncodeError) as exc:
-                return ToolResult(content=f"修改文件被拒绝：{exc}", is_error=True)
-        else:
-            path.write_text(result, encoding="utf-8")
+            count = file_text.count(old_str)
+
+            if count > 1:
+                content = f"被修改字符串{old_str}在文中出现{count}次，无法修改"
+                return ToolResult(content=content, is_error=True)
+            if count == 0:
+                content = f"未找到被修改字符串{old_str}，无法修改"
+                return ToolResult(content=content, is_error=True)
+            result = file_text.replace(old_str, new_str)
+            if self.workspace_policy is not None:
+                try:
+                    self.workspace_policy.validate_write_content(result)
+                    await asyncio.to_thread(
+                        path.write_text, result, encoding="utf-8"
+                    )
+                except (WorkspacePathError, OSError, UnicodeEncodeError) as exc:
+                    return ToolResult(content=f"修改文件被拒绝：{exc}", is_error=True)
+            else:
+                await asyncio.to_thread(
+                    path.write_text, result, encoding="utf-8"
+                )
         return ToolResult(content=f"成功！文件 {path.name} 已被修改。", is_error=False)

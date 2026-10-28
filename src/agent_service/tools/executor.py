@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -47,11 +48,14 @@ async def execute_tools(
     allowed_tool_names: frozenset[str] | None = None,
     approved_tool_call_ids: frozenset[str] = frozenset(),
     tool_registry: Mapping[str, Tool] | None = None,
+    max_concurrency: int = 4,
 ) -> ToolExecutionBatch:
     active_registry = tool_registry if tool_registry is not None else TOOL_REGISTRY
-    parts: list[types.Part] = []
-    executions: list[ToolExecution] = []
-    for fc in function_calls:
+    semaphore = asyncio.Semaphore(max(1, max_concurrency))
+
+    async def _run_single(
+        fc: types.FunctionCall,
+    ) -> tuple[ToolExecution, types.Part]:
         name = fc.name or ""
         call_id = fc.id or ""
         args = dict(fc.args or {})
@@ -69,17 +73,20 @@ async def execute_tools(
                 is_error=True,
             )
         else:
-            result = await t.run(parameter=args)
+            async with semaphore:
+                result = await t.run(parameter=args)
 
-        executions.append(
-            ToolExecution(
-                call_id=call_id,
-                name=name,
-                arguments=args,
-                result=result,
-            )
+        execution = ToolExecution(
+            call_id=call_id,
+            name=name,
+            arguments=args,
+            result=result,
         )
-        parts.append(tool_result_part(name, result, call_id))
+        return execution, tool_result_part(name, result, call_id)
+
+    pairs = await asyncio.gather(*(_run_single(fc) for fc in function_calls))
+    executions = [pair[0] for pair in pairs]
+    parts = [pair[1] for pair in pairs]
 
     return ToolExecutionBatch(
         content=types.Content(role="user", parts=parts),

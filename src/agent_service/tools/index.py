@@ -4,12 +4,15 @@ from google.genai import types
 
 from agent_service.tools.base import Tool
 from agent_service.tools.edit_file import EditFileTool
+from agent_service.tools.fetch_web_page import FetchWebPageTool
 from agent_service.tools.list_files import ListFilesTool
 from agent_service.tools.plan_tool import UpdatePlanTool
 from agent_service.tools.quality_check import QualityCheckTool
 from agent_service.tools.read_file import ReadFileTool
 from agent_service.tools.reflect_tool import ReflectTool
 from agent_service.tools.run_command import RunCommandTool
+from agent_service.tools.subagent_tool import SubagentTool
+from agent_service.tools.web_search import WebSearchTool
 from agent_service.tools.workspace import WorkspacePathPolicy
 from agent_service.tools.write_file import WriteFileTool
 from agent_service.tools.yaml_loader import LoadYamlTool
@@ -26,6 +29,9 @@ ALL_TOOLS: list[Tool] = [
     RunCommandTool(),
     UpdatePlanTool(),
     ReflectTool(),
+    SubagentTool(),
+    WebSearchTool(),
+    FetchWebPageTool(),
 ]
 
 TOOL_REGISTRY: dict[str, Tool] = {tool.name: tool for tool in ALL_TOOLS}
@@ -73,6 +79,7 @@ def create_web_tool_registry(
     *,
     enable_mutating_tools: bool = False,
     enable_quality_tool: bool = False,
+    enable_subagent_tool: bool = False,
 ) -> dict[str, Tool]:
     """显式构造 Web 工具表，新增全局工具不会被自动暴露。"""
 
@@ -89,4 +96,6 @@ def create_web_tool_registry(
         )
     if enable_quality_tool:
         tools.append(QualityCheckTool(workspace_policy))
+    if enable_subagent_tool:
+        tools.append(SubagentTool())
     return {tool.name: tool for tool in tools}

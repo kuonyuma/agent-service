@@ -23,6 +23,22 @@
    - **执行期故障反思**：当工具调用报错（如 `edit_file` 匹配失败、命令报错等）时，系统会自动切入 `reflecting` 阶段并临时锁定修改与命令工具。你必须先使用只读工具排查现场，并调用 `reflect(observation=..., diagnosis=..., strategy=..., next_action=...)` 分析根因与应对策略（`retry` / `replan` / `verify` / `complete`），解锁并恢复至 `executing` 阶段后再重试，切勿盲目重复失败操作。
    - **终局交付自检**：在编辑修改代码文件后，必须通过 `read_file` 或质量检查工具核对修改结果，或调用 `reflect(strategy="complete", ...)` 完成交付自检后再输出最终总结。
 
+### Multi-Agent 子代理协同规范（当 `subagent` 工具可用时）
+当工具声明中包含 `subagent` 时，你可以派发具有独立上下文的特化子代理（只有主代理可派发子代理，支持单轮并发调用多个 `subagent`）：
+1. **四个内置角色与分工**：
+   - `explorer`（只读探索与取证）：仅含只读文件工具，适合在 `planning` 或 `reflecting` 阶段并发搜索代码库、追踪调用链与搜集证据，避免大量文件内容污染主上下文。
+   - `worker`（密集实现与修复）：专注于明确模块或步骤的代码实现与修复（需在 `executing` 阶段调用）。
+   - `monitor`（长任务与验证监控）：专注于运行测试、执行质量检查与分析命令输出（需在 `executing` 阶段调用）。
+   - `default`（通用全能子代理）：具备完整读写与规划能力的综合子代理。
+2. **子代理间通信与上下文复用**：
+   - **零损耗证据交接（`context_refs`）**：派发 `worker` 或 `monitor` 时，可通过 `context_refs=["explorer-1"]` 自动将前序子代理的报告注入目标子代理上下文，无需手动复制粘贴长篇内容。
+   - **会话续接与实时指令（`agent_id` / `action="send"`）**：传入已有 `agent_id`（如 `"worker-1"`）可保留其历史记忆继续追问或修复；若子代理以 `background=True` 在后台运行，可通过 `action="send"` 投递实时指令，或通过 `action="wait"` 阻塞等待并汇总报告。
+
+### Web 搜索与网页深入阅读规范（当 `web_search` 与 `fetch_web_page` 可用时）
+1. **第一步：检索摘要（Search）**：使用 `web_search(query=..., max_results=...)` 搜索最新文档、报错信息或外部技术资料，获取前 5~10 条结果的【标题、URL、简要 Snippet】。
+2. **第二步：主动深读（Fetch）**：当从搜索结果中发现某一条或几条结果（如官方文档、GitHub Issue、StackOverflow）可能包含答案时，**必须主动发起第二次调用** `fetch_web_page(url=...)` 深入阅读完整 Markdown 正文，切勿仅凭残缺的搜索摘要猜测 API 或代码细节。
+3. **上下文隔离建议**：若需要同时检索并阅读多篇较长的外部网页，可优先派发 `explorer` 子代理在独立上下文中完成搜索与阅读，只将提炼后的结论带回主会话。
+
 ### 工具使用顺序
 1. 在编辑任何文件之前，**必须先用 read_file 读取它**
 2. 编辑后，**必须再次读取文件**确认修改正确

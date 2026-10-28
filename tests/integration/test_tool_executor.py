@@ -104,6 +104,8 @@ async def test_execute_tools_requires_single_call_approval_for_write(tmp_path):
 
 def test_tool_registry_exposes_function_declarations():
     assert find_tool("read_file") is not None
+    assert find_tool("web_search") is not None
+    assert find_tool("fetch_web_page") is not None
     assert len(TOOL_REGISTRY) == len(ALL_TOOLS)
 
     declarations = get_function_declarations()
@@ -113,6 +115,8 @@ def test_tool_registry_exposes_function_declarations():
 
     assert "read_file" in names
     assert "write_file" in names
+    assert "web_search" in names
+    assert "fetch_web_page" in names
 
 
 def test_web_read_only_registry_is_explicit_and_fail_closed():
@@ -120,6 +124,8 @@ def test_web_read_only_registry_is_explicit_and_fail_closed():
 
     assert get_read_only_tool_names() == frozenset({"list_files", "read_file"})
     assert "load_yaml" not in get_read_only_tool_names()
+    assert "web_search" not in get_read_only_tool_names()
+    assert "fetch_web_page" not in get_read_only_tool_names()
 
 
 @pytest.mark.asyncio

@@ -740,4 +740,113 @@ async def test_pre_completion_verification_triggers_reflection_after_unverified_
     assert events[-1].result is not None
     assert events[-1].result.turns == 5
     assert events[-1].result.plan is not None
+    assert len( events[-1].result.plan.reflections) == 1
     assert events[-1].result.plan.reflections[-1].strategy == "complete"
+
+
+@pytest.mark.asyncio
+async def test_two_stage_web_search_then_fetch_web_page_in_loop(monkeypatch):
+    """验证模型先调用 web_search 获取候选链接，再主动调用 fetch_web_page 深入阅读的两步链路。"""
+
+    from agent_service.tools.fetch_web_page import (
+        FetchedPageResponse,
+        FetchWebPageTool,
+        OutputFormat,
+    )
+    from agent_service.tools.index import TOOL_REGISTRY
+    from agent_service.tools.web_search import WebSearchTool
+
+    search_queries: list[str] = []
+    fetched_urls: list[str] = []
+
+    async def fake_search_fetcher(q: str, max_results: int) -> str:
+        search_queries.append(q)
+        return """
+        <div class="results">
+          <div class="result">
+            <a class="result__a" href="https://docs.python.org/3/library/asyncio-task.html">
+              Coroutines and Tasks — Python documentation
+            </a>
+            <div class="result__snippet">asyncio.TaskGroup provides structured concurrency.</div>
+          </div>
+        </div>
+        """
+
+    async def fake_page_fetcher(
+        url: str,
+        output_format: OutputFormat,
+        timeout_seconds: float,
+    ) -> FetchedPageResponse:
+        fetched_urls.append(url)
+        return FetchedPageResponse(
+            url=url,
+            status_code=200,
+            content_type="text/html; charset=utf-8",
+            text="<html><head><title>TaskGroup Docs</title></head><body><h1>TaskGroup</h1><pre><code>async with asyncio.TaskGroup() as tg:\n    tg.create_task(coro())</code></pre></body></html>",
+        )
+
+    custom_registry = {
+        **TOOL_REGISTRY,
+        "web_search": WebSearchTool(fetcher=fake_search_fetcher),
+        "fetch_web_page": FetchWebPageTool(fetcher=fake_page_fetcher),
+    }
+
+    call_count = 0
+
+    async def fake_stream_message(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # 第一步：模型调用 web_search
+            yield message_done(
+                function_calls=[
+                    types.FunctionCall(
+                        name="web_search",
+                        args={"query": "python asyncio TaskGroup", "max_results": 5},
+                    )
+                ]
+            )
+        elif call_count == 2:
+            # 第二步：模型看到搜索结果中的 URL 后主动发起 fetch_web_page
+            yield message_done(
+                function_calls=[
+                    types.FunctionCall(
+                        name="fetch_web_page",
+                        args={"url": "https://docs.python.org/3/library/asyncio-task.html"},
+                    )
+                ]
+            )
+        else:
+            yield message_done(
+                contents="根据官方文档，可以使用 asyncio.TaskGroup 实现结构化并发。",
+                raw_parts=[
+                    types.Part.from_text(
+                        text="根据官方文档，可以使用 asyncio.TaskGroup 实现结构化并发。"
+                    )
+                ],
+            )
+
+    monkeypatch.setattr(
+        agent_service.core.agentic_loop,
+        "stream_message",
+        fake_stream_message,
+    )
+
+    events = [
+        event
+        async for event in query(
+            initial_contents(),
+            tools=get_function_declarations(custom_registry),
+            tool_registry=custom_registry,
+        )
+    ]
+
+    assert search_queries == ["python asyncio TaskGroup"]
+    assert fetched_urls == ["https://docs.python.org/3/library/asyncio-task.html"]
+    completed_tools = [
+        e.tool_name for e in events if e.type == "tool.completed"
+    ]
+    assert completed_tools == ["web_search", "fetch_web_page"]
+    assert events[-1].type == "run.completed"
+    assert events[-1].result is not None
+    assert events[-1].result.reason == "completed"

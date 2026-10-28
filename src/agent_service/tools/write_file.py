@@ -3,7 +3,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from agent_service.tools.base import Tool, ToolResult
-from agent_service.tools.workspace import WorkspacePathError, WorkspacePathPolicy
+from agent_service.tools.workspace import (
+    WorkspacePathError,
+    WorkspacePathPolicy,
+    get_file_lock,
+)
 
 
 class WriteFileTool(Tool):
@@ -35,11 +39,12 @@ class WriteFileTool(Tool):
             try:
                 absolute_path = self.workspace_policy.resolve_for_write(str_path)
                 self.workspace_policy.validate_write_content(content)
-                await asyncio.to_thread(
-                    absolute_path.write_text,
-                    content,
-                    encoding="utf-8",
-                )
+                async with get_file_lock(absolute_path):
+                    await asyncio.to_thread(
+                        absolute_path.write_text,
+                        content,
+                        encoding="utf-8",
+                    )
             except (WorkspacePathError, OSError, UnicodeEncodeError) as exc:
                 return ToolResult(content=f"写入文件被拒绝：{exc}", is_error=True)
             byte_count = len(content.encode("utf-8"))
@@ -52,10 +57,13 @@ class WriteFileTool(Tool):
         absolute_path = Path(str_path).resolve()
 
         try:
-            await asyncio.to_thread(
-                absolute_path.parent.mkdir, parents=True, exist_ok=True
-            )
-            await asyncio.to_thread(absolute_path.write_text, content, encoding="utf-8")
+            async with get_file_lock(absolute_path):
+                await asyncio.to_thread(
+                    absolute_path.parent.mkdir, parents=True, exist_ok=True
+                )
+                await asyncio.to_thread(
+                    absolute_path.write_text, content, encoding="utf-8"
+                )
         except (OSError, UnicodeEncodeError) as exc:
             return ToolResult(content=f"写入操作出错\n出错信息:{exc}", is_error=True)
         return ToolResult(
