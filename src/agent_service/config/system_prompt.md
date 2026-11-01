@@ -9,6 +9,7 @@
 不要猜测或请求未声明的工具。
 
 ## Behavioral Rules（行为规则）
+
 ### Plan-Execute-Reflect 工作流（三阶段规划、执行与反思规范）
 当工具声明中包含 `update_plan` 与 `reflect` 时，你处于三阶段闭环工作流模式：
 1. **阶段一：规划阶段（Planning - 只读探索）**

@@ -97,7 +97,9 @@ PageFetcher = Callable[[str, OutputFormat, float], Awaitable[FetchedPageResponse
 
 
 def validate_public_http_url(raw_url: str) -> str:
-    """校验 URL 协议与目标主机，拒绝非 http(s) 与本机/内网私有地址（防 SSRF）。"""
+    """
+    检查传入的 URL 是否符合这个工具的访问规则，符合就返回处理后的 URL，不符合就抛出错误。
+    """
 
     if not isinstance(raw_url, str) or not raw_url.strip():
         raise ValueError("URL 不能为空。")
@@ -114,17 +116,19 @@ def validate_public_http_url(raw_url: str) -> str:
         raise ValueError(f"安全策略禁止访问本地或内网主机：{hostname}")
 
     try:
-        ip = ipaddress.ip_address(hostname)
+        
+        ip = ipaddress.ip_address(hostname) # 输入一个字符串地址，返回一个ip对象，无法接收域名。
+
     except ValueError:
         ip = None
 
     if ip is not None and (
-        ip.is_loopback
-        or ip.is_private
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
+        ip.is_loopback # 回环地址
+        or ip.is_private # 私有地址
+        or ip.is_link_local # 链路本地地址
+        or ip.is_multicast # 组播地址
+        or ip.is_reserved # 特殊地址
+        or ip.is_unspecified # 未指定地址
     ):
         raise ValueError(f"安全策略禁止访问本地回环或私有网段地址：{hostname}")
 
@@ -419,7 +423,7 @@ class FetchWebPageTool(Tool):
                 "description": "要抓取的完整网页地址（必须以 http:// 或 https:// 开头）",
             },
             "format": {
-                "type": "STRING",
+                "type": "STRING", 
                 "enum": ["markdown", "text", "html"],
                 "description": "返回内容格式：'markdown'（默认，推荐阅读代码与文档）、'text'（纯文本）、'html'（原始 HTML）",
             },
@@ -437,12 +441,13 @@ class FetchWebPageTool(Tool):
     read_only = True
 
     def __init__(self, fetcher: PageFetcher | None = None) -> None:
+        """自由指定抓取网页的函数"""
         self._fetcher = fetcher or _default_page_fetcher
 
     async def run(self, parameter: dict[str, Any]) -> ToolResult:
         raw_url = parameter.get("url", "")
         try:
-            url = validate_public_http_url(raw_url)
+            url = validate_public_http_url(raw_url) # 防止SSRF
         except ValueError as exc:
             return ToolResult(content=f"抓取网页被拒绝：{exc}", is_error=True)
 
@@ -479,11 +484,11 @@ class FetchWebPageTool(Tool):
                 is_error=True,
             )
         timeout_seconds = float(
-            max(1.0, min(float(raw_timeout), MAX_TIMEOUT_SECONDS))
+            max(1.0, min(float(raw_timeout), MAX_TIMEOUT_SECONDS)) # 默认最大120s
         )
 
         try:
-            fetched = await self._fetcher(url, output_format, timeout_seconds)
+            fetched = await self._fetcher(url, output_format, timeout_seconds)  # fetched就是定向抓取网页的结果
         except ValueError as exc:
             return ToolResult(content=f"抓取网页被拒绝：{exc}", is_error=True)
         except httpx.TimeoutException:
@@ -507,6 +512,7 @@ class FetchWebPageTool(Tool):
         is_html = "text/html" in content_type or "application/xhtml+xml" in content_type
         page_title = ""
 
+        # 将从网站中获取到的body转化成对应的格式
         if output_format == "markdown":
             if is_html:
                 page_title, body = convert_html_to_markdown(
@@ -530,12 +536,12 @@ class FetchWebPageTool(Tool):
             )
 
         total_chars = len(body)
-        truncated = False
+        truncated = False # 标记文本是否被截断
         if total_chars > max_chars:
             body = body[:max_chars]
             truncated = True
 
-        header_lines = [f"### 🌐 网页内容：`{fetched.url}`"]
+        header_lines = [f"### 🌐 网页内容：`{fetched.url}`"] # 创建一个字符串列表储存结果
         if page_title:
             header_lines.append(f"- **标题**：{page_title}")
         header_lines.append(

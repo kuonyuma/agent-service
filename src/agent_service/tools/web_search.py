@@ -1,4 +1,4 @@
-import re
+import re # Regular Expression
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,6 +18,7 @@ DEFAULT_SEARCH_TIMEOUT = 20.0
 DUCKDUCKGO_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
 
 _WHITESPACE_RE = re.compile(r"\s+")
+# r表示不要转义双引号里的字符
 
 
 @dataclass(frozen=True)
@@ -26,27 +27,30 @@ class SearchResultItem:
 
     title: str
     url: str
-    snippet: str
+    snippet: str # 摘要
 
 
 def _normalize_ws(text: str) -> str:
+    """
+    把多个空格正则成一个空格，再除去首尾空格
+    """
     return _WHITESPACE_RE.sub(" ", text).strip()
 
 
 def unwrap_search_url(raw_url: str) -> str:
     """将 DuckDuckGo 的重定向链接（如 //duckduckgo.com/l/?uddg=...）解包为真实目标 URL。"""
 
-    href = raw_url.strip()
+    href = raw_url.strip() # 去除空格
     if not href:
         return ""
-    if href.startswith("//"):
+    if href.startswith("//"): # 检查是否字符串是否以//开头
         href = f"https:{href}"
-    parsed = urlparse(href)
+    parsed = urlparse(href) # 将一段网页拆分成几个部分
     if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
         query_params = parse_qs(parsed.query)
-        uddg_values = query_params.get("uddg")
+        uddg_values = query_params.get("uddg")  # 此时拿到包含在qeury里的目标url
         if uddg_values and uddg_values[0]:
-            return unquote(uddg_values[0]).strip()
+            return unquote(uddg_values[0]).strip() #  将% 编码的路径或字符串还原为中文/原始字符
     return href
 
 
@@ -70,22 +74,28 @@ class _DuckDuckGoHTMLParser(HTMLParser):
     """解析 DuckDuckGo HTML/Lite 搜索结果页，提取标题、URL 与摘要。"""
 
     def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
+        super().__init__(convert_charrefs=True)# true 将链接中的转义字符变成便于人类阅读的原始形态
         self.results: list[SearchResultItem] = []
 
+        # 标题相关字段
         self._in_title_link = False
-        self._title_depth = 0
-        self._title_chunks: list[str] = []
+        self._title_depth = 0 # 嵌套深度计数器
+        self._title_chunks: list[str] = [] 
         self._current_url = ""
 
+        # 摘要相关字段
         self._in_snippet = False
         self._snippet_depth = 0
         self._snippet_chunks: list[str] = []
 
+        # 缓冲区
         self._pending_title = ""
         self._pending_url = ""
 
     def _flush_pending(self, snippet: str = "") -> None:
+        """
+        把当前暂存的标题和 URL 结算掉，装配成一条真正的搜索结果存入列表，并清空暂存区
+        """
         if not self._pending_title or not self._pending_url:
             return
         url = unwrap_search_url(self._pending_url)
@@ -130,6 +140,9 @@ class _DuckDuckGoHTMLParser(HTMLParser):
             self._snippet_chunks = []
 
     def handle_endtag(self, tag: str) -> None:
+        """
+        判断当前正在抓取的“标题”或“摘要”是不是彻底结束了；如果结束了，就把收集齐的文字组装打包。
+        """
         if self._in_title_link:
             self._title_depth -= 1
             if self._title_depth <= 0:
@@ -155,6 +168,7 @@ class _DuckDuckGoHTMLParser(HTMLParser):
             self._snippet_chunks.append(data)
 
     def close(self) -> None:
+        # 强制刷新父类缓冲区的数据
         super().close()
         if self._pending_title and self._pending_url:
             self._flush_pending()
@@ -183,7 +197,11 @@ def parse_duckduckgo_html(
 
 
 async def _default_duckduckgo_fetcher(query: str, max_results: int) -> str:
+    """
+    唯一一个用异步 HTTP 客户端（httpx）穿过互联网、向 DuckDuckGo 服务器发送真实请求、并把网页 HTML 源码拉回来的函数。
+    """
     del max_results
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -195,14 +213,14 @@ async def _default_duckduckgo_fetcher(query: str, max_results: int) -> str:
     }
     async with httpx.AsyncClient(
         timeout=DEFAULT_SEARCH_TIMEOUT,
-        follow_redirects=True,
+        follow_redirects=True, # 自动跟随重定向
     ) as client:
         response = await client.post(
             DUCKDUCKGO_HTML_ENDPOINT,
             data={"q": query},
             headers=headers,
         )
-        response.raise_for_status()
+        response.raise_for_status()    # 一旦 HTTP 状态码不是 2xx（比如变成了 403、500 等错误），就立刻主动抛出 httpx.HTTPStatusError 异常！状态码异常检查
         return response.text
 
 
