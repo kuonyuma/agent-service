@@ -41,3 +41,57 @@ async def test_close_client_releases_sync_and_async_clients(monkeypatch):
 
     assert calls == ["async", "sync"]
     assert client_module.client is None
+
+
+@pytest.mark.asyncio
+async def test_stream_message_extracts_cached_content_token_count(monkeypatch):
+    import agent_service.client.stream_message as stream_module
+
+    async def fake_chunks():
+        yield SimpleNamespace(
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=120,
+                candidates_token_count=30,
+                cached_content_token_count=96,
+            ),
+            candidates=[
+                SimpleNamespace(
+                    finish_reason="STOP",
+                    content=SimpleNamespace(
+                        parts=[
+                            SimpleNamespace(
+                                text="命中缓存回复",
+                                function_call=None,
+                            )
+                        ]
+                    ),
+                )
+            ],
+        )
+
+    async def fake_stream(**kwargs):
+        return fake_chunks()
+
+    fake_client = SimpleNamespace(
+        aio=SimpleNamespace(
+            models=SimpleNamespace(generate_content_stream=fake_stream)
+        )
+    )
+    monkeypatch.setattr(stream_module, "get_client", lambda: fake_client)
+
+    events = [
+        ev
+        async for ev in stream_module.stream_message(
+            contents=[],
+            system_prompt="测试提示词",
+        )
+    ]
+
+    done_event = events[-1]
+    assert done_event.type == "message_done"
+    assert done_event.result is not None
+    assert done_event.result.usage == {
+        "input_len": 120,
+        "output_len": 30,
+        "cached_len": 96,
+    }

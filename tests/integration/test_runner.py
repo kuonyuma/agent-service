@@ -64,8 +64,11 @@ async def test_runner_returns_new_history_without_modifying_input(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_runner_injects_plan_progress_into_executing_turn_prompt(monkeypatch):
+async def test_runner_keeps_system_prompt_fixed_and_passes_plan_via_tool_result(
+    monkeypatch,
+):
     received_prompts: list[str] = []
+    second_turn_contents: list[types.Content] = []
     call_count = 0
 
     async def fake_stream_message(*args, **kwargs):
@@ -98,6 +101,7 @@ async def test_runner_injects_plan_progress_into_executing_turn_prompt(monkeypat
                 ),
             )
         else:
+            second_turn_contents.extend(kwargs["contents"])
             yield StreamEvent(
                 type="message_done",
                 result=StreamResult(
@@ -129,9 +133,88 @@ async def test_runner_injects_plan_progress_into_executing_turn_prompt(monkeypat
         "plan.updated",
         "run.completed",
     ]
-    assert received_prompts[0] == "基础系统提示词"
-    assert "当前执行计划状态" in received_prompts[1]
-    assert "验证 Runner 计划注入" in received_prompts[1]
+    assert received_prompts == ["基础系统提示词", "基础系统提示词"]
+    second_turn_parts = second_turn_contents[-1].parts
+    assert second_turn_parts is not None
+    last_tool_response = second_turn_parts[0].function_response
+    assert last_tool_response is not None
+    assert "验证 Runner 计划注入" in str(last_tool_response.response)
     assert events[-1].result is not None
     assert events[-1].result.plan is not None
     assert events[-1].result.plan.is_completed()
+
+
+@pytest.mark.asyncio
+async def test_runner_appends_reset_runtime_notice_when_history_has_prior_plan(
+    monkeypatch,
+):
+    captured_contents: list[types.Content] = []
+
+    async def fake_stream_message(*args, **kwargs):
+        captured_contents.extend(kwargs["contents"])
+        yield StreamEvent(
+            type="message_done",
+            result=StreamResult(
+                contents="已在新规划阶段直接回答",
+                stop_reason="STOP",
+                usage={"input_len": 20, "output_len": 6, "cached_len": 12},
+                raw_parts=[types.Part.from_text(text="已在新规划阶段直接回答")],
+            ),
+        )
+
+    monkeypatch.setattr(
+        agent_service.core.agentic_loop,
+        "stream_message",
+        fake_stream_message,
+    )
+    prior_history = [
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(text="上一轮任务")],
+        ),
+        types.Content(
+            role="model",
+            parts=[
+                types.Part.from_function_call(
+                    name="update_plan",
+                    args={"action": "create", "goal": "旧目标"},
+                )
+            ],
+        ),
+        types.Content(
+            role="user",
+            parts=[
+                types.Part.from_function_response(
+                    name="update_plan",
+                    response={"result": "计划已创建，处于 executing", "is_error": False},
+                )
+            ],
+        ),
+        types.Content(
+            role="model",
+            parts=[types.Part.from_text(text="旧任务已完成")],
+        ),
+    ]
+    runner = AgentRunner(tools=[], system_prompt="基础系统提示词")
+
+    events = [
+        event
+        async for event in runner.run_turn(
+            history=prior_history,
+            user_query="新一轮问题",
+        )
+    ]
+
+    assert len(prior_history) == 4
+    last_user_parts = captured_contents[-1].parts or []
+    assert len(last_user_parts) == 2
+    assert last_user_parts[0].text == "新一轮问题"
+    assert last_user_parts[1].text is not None
+    assert "<runtime-notice>" in last_user_parts[1].text
+    assert "重置为规划阶段（planning）" in last_user_parts[1].text
+    assert events[-1].result is not None
+    assert events[-1].result.usage == {
+        "input_len": 20,
+        "output_len": 6,
+        "cached_len": 12,
+    }

@@ -236,16 +236,25 @@ async def test_concurrent_explorers_and_worker_handoff_in_full_loop(
 async def test_subagent_graceful_final_turn_strips_tools_and_summarizes(
     monkeypatch,
 ):
-    """验证子代理到达 max_turns 最后一轮时自动剥离工具声明，强制模型输出文本总结而非报错。"""
+    """验证子代理到达 max_turns 最后一轮时保持 system_prompt 固定不变，
+    将总结指令作为 <runtime-notice> 追加到历史尾部，并剥离工具声明强制总结。
+    """
 
     tools_by_turn: list[list[types.Tool]] = []
+    prompts_by_turn: list[str] = []
 
     async def fake_stream_message(*args, **kwargs):
         tools_arg = kwargs.get("tools") or []
         tools_by_turn.append(tools_arg)
         system_prompt: str = kwargs.get("system_prompt") or ""
+        prompts_by_turn.append(system_prompt)
+        contents: list[types.Content] = kwargs.get("contents") or []
+        last_parts = contents[-1].parts or []
+        last_text = "".join(p.text for p in last_parts if p.text)
 
-        if "最终轮总结指令" in system_prompt:
+        if "最终轮总结指令" in last_text:
+            assert "<runtime-notice>" in last_text
+            assert "最终轮总结指令" not in system_prompt
             assert tools_arg == []
             yield message_done(
                 contents="已达最大步数，输出阶段性探索总结报告。"
@@ -270,13 +279,14 @@ async def test_subagent_graceful_final_turn_strips_tools_and_summarizes(
         types.Content(
             role="user",
             parts=[types.Part.from_text(text="持续探索")],
-        )
+        ),
     ]
     events = [
         event
         async for event in query(
             initial,
             tools=get_function_declarations(),
+            system_prompt="固定子代理系统提示词",
             max_turns=3,
             plan_and_execute=False,
             graceful_final_turn=True,
@@ -287,6 +297,11 @@ async def test_subagent_graceful_final_turn_strips_tools_and_summarizes(
     assert len(tools_by_turn[0]) > 0
     assert len(tools_by_turn[1]) > 0
     assert tools_by_turn[2] == []
+    assert prompts_by_turn == [
+        "固定子代理系统提示词",
+        "固定子代理系统提示词",
+        "固定子代理系统提示词",
+    ]
     assert events[-1].type == "run.completed"
     assert events[-1].result is not None
     assert events[-1].result.reason == "completed"

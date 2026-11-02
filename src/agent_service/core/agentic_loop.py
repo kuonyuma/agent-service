@@ -43,6 +43,19 @@ class ToolApprovalRequest:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> ToolApprovalRequest:
+        """生成一份“工具执行申请单”。
+
+        当模型想执行危险操作（比如改文件、跑命令）时，先把“调哪个工具、传了什么参数”
+        打包成一份申请单，并算出一个唯一特征码，方便后面找用户确认时核对内容有没有被改动。
+
+        参数:
+            call_id: 这次工具调用的编号。
+            tool_name: 要调用的工具名字，比如 "write_file"。
+            arguments: 调用工具时传入的参数，比如文件路径和内容。
+
+        返回:
+            打包好的申请单对象（ToolApprovalRequest）。
+        """
         canonical = json.dumps(
             {
                 "call_id": call_id,
@@ -106,6 +119,15 @@ class LoopEvent:
 
 
 def _usage_value(usage: dict[str, Any], key: str) -> int:
+    """从 token 统计字典里安全地取出对应的数字。
+
+    参数:
+        usage: 存放 token 消耗量的字典。
+        key: 想取的字段名，比如 "input_len"（输入量）或 "output_len"（输出量）。
+
+    返回:
+        如果里面有这个字段且是整数，就返回对应的数字；如果不存在或格式不对，就返回 0。
+    """
     value = usage.get(key, 0)
     return value if isinstance(value, int) else 0
 
@@ -114,14 +136,30 @@ def _merged_usage(
     usage: dict[str, int],
     subagent_manager: SubagentManager | None,
 ) -> dict[str, int]:
+    """把主 Agent 和所有子 Agent 消耗的 token 数量加在一起。
+
+    参数:
+        usage: 主 Agent 自己消耗的 token 统计。
+        subagent_manager: 子 Agent 管家，里面记着所有子 Agent 消耗的 token；
+            如果没有用到子 Agent，这里就是 None。
+
+    返回:
+        汇总后的 token 字典，包含总输入量（input_len）、总输出量（output_len），
+        以及有缓存命中时的缓存量（cached_len）。
+    """
     if subagent_manager is None:
         return dict(usage)
-    return {
+    merged: dict[str, int] = {
         "input_len": usage.get("input_len", 0)
         + subagent_manager.total_usage.get("input_len", 0),
         "output_len": usage.get("output_len", 0)
         + subagent_manager.total_usage.get("output_len", 0),
     }
+    if "cached_len" in usage or "cached_len" in subagent_manager.total_usage:
+        merged["cached_len"] = usage.get(
+            "cached_len", 0
+        ) + subagent_manager.total_usage.get("cached_len", 0)
+    return merged
 
 
 def _run_result(
@@ -134,6 +172,21 @@ def _run_result(
     error: AgentServiceError | None = None,
     plan: ExecutionPlan | None = None,
 ) -> LoopResult:
+    """在整次任务结束时，把最终运行结果打包成一个结果对象。
+
+    参数:
+        reason: 为什么结束。"completed" 表示正常完成，"max_turns" 表示跑满最大轮数也没做完，
+            "error" 表示中途出错停止。
+        history: 任务结束时的完整聊天记录（包含之前的旧记录和这次新增的记录）。
+        new_contents: 仅在这次运行中新增的聊天记录。
+        turns: 这次一共跟大模型来回对话了多少轮。
+        usage: 这次任务总共消耗的 token 数量。
+        error: 如果是因为出错结束，这里放具体的错误对象；正常结束时为 None。
+        plan: 当前的任务计划表；如果这次任务建过计划或做过反思，就保存一份副本，否则为 None。
+
+    返回:
+        打包好的最终运行结果（LoopResult）。
+    """
     return LoopResult(
         reason=reason,
         history=list(history),
@@ -149,7 +202,18 @@ def _filter_planning_tools( # 工具过滤器
     tools: list[types.Tool],
     registry: ToolRegistry,
 ) -> list[types.Tool]:
-    """在只读阶段（planning / reflecting）仅向模型暴露 read_only 工具（含 update_plan 与 reflect）。"""
+    """挑出所有“只读、不改东西”的安全工具。
+
+    在刚开始做计划（planning）或出错后做反思（reflecting）时，不能让模型改文件或跑命令，
+    所以用这个函数把能改东西的工具过滤掉，只留下看文件、改计划、写反思这类安全工具。
+
+    参数:
+        tools: 原来准备提供给模型的全部工具说明列表。
+        registry: 工具箱字典（名字 -> 工具对象），用来查每个工具是不是只读工具。
+
+    返回:
+        过滤后只包含只读工具的列表，直接拿去发给模型。
+    """
 
     filtered: list[types.Tool] = []
     for tool_group in tools:
@@ -170,23 +234,109 @@ def _filter_planning_tools( # 工具过滤器
     return filtered
 
 
-def _build_turn_system_prompt(
-    base_prompt: str,
-    plan_state: ExecutionPlan,
-) -> str:
-    """在执行或反思阶段将最新计划与反思状态注入系统提示词。"""
+def _build_runtime_notice(body: str) -> str:
+    """给系统提示语套上 `<runtime-notice>` 标签。
 
-    if not plan_state.has_state():
-        return base_prompt
-    prompt = f"{base_prompt}\n\n## 当前执行计划状态\n{plan_state.format_markdown()}"
-    if plan_state.phase == "reflecting":
-        prompt += (
-            "\n\n## 反思阶段指令（Reflecting）\n"
-            "当前处于只读反思阶段，修改与命令类工具已临时锁定。"
-            "请先使用只读工具检查上下文（如需），并调用 `reflect` 工具提交故障根因或交付自检分析"
-            "（或调用 `update_plan(action='replan', ...)` 动态调整计划），恢复至 `executing` 阶段后再执行修改操作。"
+    套上这个标签是为了告诉大模型：“这段话是程序自动发给你的状态提醒，不是用户说的话。”
+
+    参数:
+        body: 要提醒大模型的文字内容。
+
+    返回:
+        去掉首尾多余空格、并包好 `<runtime-notice>...</runtime-notice>` 标签的字符串。
+    """
+
+    return f"<runtime-notice>\n{body.strip()}\n</runtime-notice>"
+
+
+def _append_user_notice(
+    history: list[types.Content],
+    notice_text: str,
+) -> None:
+    """把一条系统状态提醒塞到聊天记录的最后面。
+
+    大模型的聊天记录要求“用户一句、模型一句”交替出现。如果最后一条本来就是用户消息，
+    就直接把提醒拼进这条消息里；如果不是，就在末尾新建一条用户消息放进去。
+    注意：这个函数会直接修改传入的 history 列表。
+
+    参数:
+        history: 当前的聊天记录列表。
+        notice_text: 已经包好标签的提醒文字。
+
+    返回:
+        None（直接改在 history 里，不额外返回值）。
+    """
+
+    notice_part = types.Part.from_text(text=notice_text)
+    if history and history[-1].role == "user":
+        existing_parts = list(history[-1].parts or [])
+        history[-1] = types.Content(
+            role="user",
+            parts=[*existing_parts, notice_part],
         )
-    return prompt
+    else:
+        history.append(types.Content(role="user", parts=[notice_part]))
+
+
+def _history_has_prior_plan_state(
+    prior_contents: list[types.Content],
+) -> bool:
+    """看一眼之前的聊天记录里，有没有留下“上一个任务做过计划或反思”的痕迹。
+
+    比如用户聊了第二个新问题，但历史记录里还留着第一个问题的计划。
+    这个函数只负责检查历史、不会改动任何内容。如果查出来有旧痕迹，
+    外面的代码就会提醒大模型：“旧计划已经翻篇了，新任务请重新开始。”
+
+    参数:
+        prior_contents: 新问题之前的旧聊天记录列表。
+
+    返回:
+        True 表示找到了旧计划、旧反思、系统提醒或历史压缩摘要的痕迹；
+        False 表示干干净净，没有这些旧痕迹。
+    """
+
+    for item in prior_contents:
+        for part in item.parts or []:
+            if part.function_call is not None and part.function_call.name in {
+                "update_plan",
+                "reflect",
+            }:
+                return True
+            if (
+                part.function_response is not None
+                and part.function_response.name in {"update_plan", "reflect"}
+            ):
+                return True
+            if part.text and (
+                "<runtime-notice>" in part.text
+                or "[系统上下文注入 - 以下是之前对话的压缩摘要" in part.text
+            ):
+                return True
+    return False
+
+
+def _build_error_reflection_notice(failed_tools: list[str]) -> str:
+    """根据报错的工具名字，拼出一段“请停下来反思原因”的提醒文字。
+
+    注意：这个函数不负责检查工具成没成功，外面的代码发现工具报错后，
+    会把失败的工具名字传进来，由这个函数生成提醒话术。
+    为了安全，这里只写工具名字，不把工具报错的原始内容直接拼进去。
+
+    参数:
+        failed_tools: 这一轮执行失败的工具名字列表，比如 ["edit_file"]。
+
+    返回:
+        包好 `<runtime-notice>` 标签的反思提醒字符串。
+    """
+
+    joined = "、".join(f"`{name}`" for name in failed_tools)
+    return _build_runtime_notice(
+        f"检测到工具 {joined} 执行报错，当前已从执行阶段（executing）切换至只读反思阶段（reflecting）。\n"
+        "修改与命令类工具已临时锁定。\n"
+        "请结合上方工具返回结果排查失败原因（必要时使用只读工具检查上下文），"
+        "并调用 `reflect` 工具提交故障根因与下一步策略（或调用 `update_plan(action='replan', ...)` 动态调整计划），"
+        "恢复至 `executing` 阶段后再执行修改操作。"
+    )
 
 
 async def query(
@@ -202,7 +352,32 @@ async def query(
     inbox: asyncio.Queue[str] | None = None,
     subagent_manager: SubagentManager | None = None,
 ) -> AsyncGenerator[LoopEvent]:
-    """运行 Plan-and-Execute Agent 循环，不修改调用方传入的历史列表。"""
+    """让 Agent 真正跑起来的核心循环：不断“问大模型 -> 调工具 -> 把结果喂回大模型”，直到任务完成。
+
+    你可以把它理解成 Agent 的发动机。它会一轮一轮跟大模型对话，中间每发生一件事
+    （比如模型打出一段话、申请调工具、工具跑完了、计划更新了、任务结束了），
+    都会立刻往外抛出一个事件（LoopEvent），方便界面或接口实时展示进度。
+    传入的原始聊天记录 contents 不会被改动。
+
+    参数:
+        contents: 开始时的聊天记录列表（最后一条通常是用户刚提的问题）。
+        tools: 允许大模型看到的工具说明列表。
+        permission_check: 当模型想执行改文件、跑命令等危险工具时，用来找人确认的函数；
+            返回 True 才放行，如果不传这个函数，所有需要确认的工具都会被拒绝。
+        allowed_tool_names: 允许使用的工具白名单；传 None 表示不额外限制。
+        tool_registry: 工具箱字典（名字 -> 具体工具实现）；传 None 时使用默认的全套工具。
+        system_prompt: 给大模型设定的系统人设和规则说明；传 None 时使用默认配置。
+        max_turns: 最多允许大模型来回折腾几轮，默认 10 轮，超过还没做完就强制停下。
+        plan_and_execute: 是否开启“先定计划、再执行、出错先反思”的管控流程，默认开启（True）。
+        graceful_final_turn: 到了最后一轮时，是否收走所有工具、强迫模型直接写总结报告，
+            默认 False（常用于子 Agent）。
+        inbox: 实时消息信箱；如果运行中途有人往信箱塞了新指令，下一轮对话前会自动带给大模型。
+        subagent_manager: 管理子 Agent 的管家；如果不传，函数会在需要时自己建一个，并在结束时清理掉。
+
+    返回:
+        一个可以不断拿到运行事件的异步结果流（每次拿到的都是一个 LoopEvent，
+        最后一条固定是表示成功的 "run.completed" 或表示失败的 "run.failed"）。
+    """
 
     history = list(contents)
     initial_history_length = len(history)
@@ -240,6 +415,16 @@ async def query(
     )
 
     async def _forward_subagent_event(sub_event: LoopEvent) -> None:
+        """把子 Agent 运行时产生的事件转交给主循环，并等主循环处理完再继续。
+
+        比如子 Agent 想改文件、需要找用户审批时，得先把这个请求递到外面的主循环去处理。
+
+        参数:
+            sub_event: 子 Agent 传出来的运行事件。
+
+        返回:
+            None。
+        """
         ack = asyncio.Event()
         await forwarded_events.put((sub_event, ack))
         await ack.wait()
@@ -264,6 +449,21 @@ async def query(
 
     completion_reminder_sent = False
     reflection_reminder_sent = False
+    if (
+        use_plan_mode
+        and len(history) > 1
+        and _history_has_prior_plan_state(history[:-1])
+    ):
+        _append_user_notice(
+            history,
+            _build_runtime_notice(
+                "新一轮任务已开始，当前阶段已重置为规划阶段（planning）。\n"
+                "此前历史中的旧执行计划与阶段状态已结束，请勿沿用。\n"
+                "针对本次新任务：简单问答或单步只读查询可直接回复；"
+                "若需修改代码或多步排查，请先使用只读工具探索并调用 `update_plan(action='create', ...)` 创建新计划。"
+            ),
+        )
+
     try:
         for turn in range(1, max_turns + 1):
             completed_turns = turn
@@ -298,6 +498,14 @@ async def query(
             )
             if is_graceful_last_turn:
                 turn_tools: list[types.Tool] = []
+                _append_user_notice(
+                    history,
+                    _build_runtime_notice(
+                        "## 最终轮总结指令（Final Turn）\n"
+                        "当前已到达子代理最大运行步数，工具调用已关闭。"
+                        "请立即基于目前已掌握的上下文、证据与已完成的操作，输出完整、精炼的最终总结报告。"
+                    ),
+                )
             else:
                 turn_tools = ( # 如果处于 
                     _filter_planning_tools(tools, active_registry)  
@@ -307,22 +515,12 @@ async def query(
                     )
                     else tools
                 )
-            turn_system_prompt = _build_turn_system_prompt( #构建新的系统提示词
-                base_system_prompt,
-                plan_state,
-            )
-            if is_graceful_last_turn:
-                turn_system_prompt += (
-                    "\n\n## 最终轮总结指令（Final Turn）\n"
-                    "当前已到达子代理最大运行步数，工具调用已关闭。"
-                    "请立即基于目前已掌握的上下文、证据与已完成的操作，输出完整、精炼的最终总结报告。"
-                )
 
             result: StreamResult | None = None
             async for event in stream_message( # 请求llm
                 contents=history,
                 tools=turn_tools,
-                system_prompt=turn_system_prompt,
+                system_prompt=base_system_prompt,
                 max_tokens=settings.model_config.max_tokens,
             ):
                 if event.type == "text":
@@ -345,6 +543,10 @@ async def query(
 
             usage["input_len"] += _usage_value(result.usage, "input_len")
             usage["output_len"] += _usage_value(result.usage, "output_len")
+            if "cached_len" in result.usage:
+                usage["cached_len"] = usage.get(
+                    "cached_len", 0
+                ) + _usage_value(result.usage, "cached_len")
             history.append(types.Content(role="model", parts=result.raw_parts))
 
             if not result.function_calls: # 模型打算结束这次任务
@@ -360,7 +562,7 @@ async def query(
                             role="user",
                             parts=[
                                 types.Part.from_text(
-                                    text=(
+                                    text=_build_runtime_notice(
                                         "[系统反思提醒] 当前处于反思阶段（reflecting），尚有待处理的反思事项：\n"
                                         f"{plan_state.format_markdown()}\n\n"
                                         "请先调用 `reflect` 工具提交故障根因或交付自检分析（retry/replan/verify/complete），"
@@ -385,7 +587,7 @@ async def query(
                             role="user",
                             parts=[
                                 types.Part.from_text(
-                                    text=(
+                                    text=_build_runtime_notice(
                                         "[系统提醒] 当前执行计划中仍有未完成的步骤：\n"
                                         f"{plan_state.format_markdown()}\n\n"
                                         "请继续执行剩余步骤，或调用 `update_plan(action='update_step', ...)` "
@@ -424,9 +626,10 @@ async def query(
                             role="user",
                             parts=[
                                 types.Part.from_text(
-                                    text=(
+                                    text=_build_runtime_notice(
                                         "[系统反思提醒] 检测到你已修改代码文件，但在交付前尚未进行验证或终局自检：\n"
                                         f"{plan_state.format_markdown()}\n\n"
+                                        "当前已切换至只读反思阶段（reflecting），修改与命令类工具已临时锁定。\n"
                                         "请先使用 `read_file` 或质量检查工具核对修改结果，并调用 "
                                         "`reflect(strategy='complete', ...)` 完成终局自检后再给出最终总结。"
                                     )
@@ -586,6 +789,12 @@ async def query(
                     ex.call_id: ex for ex in batch.executions
                 }
 
+            has_batch_phase_unlock = any(
+                ex.name in {"update_plan", "reflect"} and not ex.result.is_error
+                for ex in executions_by_id.values()
+            )
+            failed_reflection_tools: list[str] = []
+            deferred_failed_executions: list[ToolExecution] = []
             tool_parts: list[types.Part] = []
             for (
                 call_id,
@@ -679,29 +888,68 @@ async def query(
                         plan_state.mark_verified()
                 elif (
                     use_reflection_mode
-                    and plan_state.phase == "executing"
                     and execution.name not in {"update_plan", "reflect"}
                     and not denied_by_user
                 ):
-                    raw_err = execution.result.content.strip()
-                    first_line = (
-                        raw_err.splitlines()[0] if raw_err else "工具执行失败"
-                    )
-                    plan_state.enter_reflection(
-                        reason=f"工具 `{execution.name}` 执行报错：{first_line}",
-                        trigger="tool_error",
-                    )
-                    yield LoopEvent(
-                        type="reflection.updated",
-                        turn=turn,
-                        phase=plan_state.phase,
-                        plan=plan_state.snapshot(),
-                    )
+                    if has_batch_phase_unlock:
+                        deferred_failed_executions.append(execution)
+                    elif plan_state.phase == "executing":
+                        raw_err = execution.result.content.strip()
+                        first_line = (
+                            raw_err.splitlines()[0]
+                            if raw_err
+                            else "工具执行失败"
+                        )
+                        plan_state.enter_reflection(
+                            reason=f"工具 `{execution.name}` 执行报错：{first_line}",
+                            trigger="tool_error",
+                        )
+                        failed_reflection_tools.append(execution.name)
+                        yield LoopEvent(
+                            type="reflection.updated",
+                            turn=turn,
+                            phase=plan_state.phase,
+                            plan=plan_state.snapshot(),
+                        )
+                    elif (
+                        plan_state.phase == "reflecting"
+                        and failed_reflection_tools
+                    ):
+                        failed_reflection_tools.append(execution.name)
                 tool_parts.append(
                     tool_result_part(
                         execution.name,
                         execution.result,
                         execution.call_id,
+                    )
+                )
+
+            if deferred_failed_executions and plan_state.phase == "executing":
+                first_failed = deferred_failed_executions[0]
+                raw_err = first_failed.result.content.strip()
+                first_line = (
+                    raw_err.splitlines()[0] if raw_err else "工具执行失败"
+                )
+                plan_state.enter_reflection(
+                    reason=f"工具 `{first_failed.name}` 执行报错：{first_line}",
+                    trigger="tool_error",
+                )
+                failed_reflection_tools.extend(
+                    ex.name for ex in deferred_failed_executions
+                )
+                yield LoopEvent(
+                    type="reflection.updated",
+                    turn=turn,
+                    phase=plan_state.phase,
+                    plan=plan_state.snapshot(),
+                )
+
+            if failed_reflection_tools and plan_state.phase == "reflecting":
+                tool_parts.append(
+                    types.Part.from_text(
+                        text=_build_error_reflection_notice(
+                            failed_reflection_tools
+                        )
                     )
                 )
 

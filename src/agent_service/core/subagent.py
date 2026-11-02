@@ -566,6 +566,14 @@ class SubagentManager:
                 session.usage["output_len"] += out_tokens
                 self.total_usage["input_len"] += in_tokens
                 self.total_usage["output_len"] += out_tokens
+                if "cached_len" in final_result.usage:
+                    cached_tokens = int(final_result.usage.get("cached_len", 0))
+                    session.usage["cached_len"] = (
+                        session.usage.get("cached_len", 0) + cached_tokens
+                    )
+                    self.total_usage["cached_len"] = (
+                        self.total_usage.get("cached_len", 0) + cached_tokens
+                    )
 
                 output_text = _extract_final_text(
                     final_result.new_contents,

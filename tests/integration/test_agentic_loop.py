@@ -526,10 +526,13 @@ async def test_error_reflection_locks_mutating_tools_until_reflect_called(
 
     call_count = 0
     declared_tool_names_by_turn: list[set[str]] = []
+    system_prompts_by_turn: list[str] = []
+    turn3_last_parts: list[types.Part] = []
 
     async def fake_stream_message(*args, **kwargs):
         nonlocal call_count
         call_count += 1
+        system_prompts_by_turn.append(kwargs.get("system_prompt") or "")
         tools_arg = kwargs.get("tools") or []
         names = {
             decl.name
@@ -562,6 +565,7 @@ async def test_error_reflection_locks_mutating_tools_until_reflect_called(
             )
         elif call_count == 3:
             # Turn 3: 处于 reflecting 阶段，若强行调用 write_file 会被拦截，同时调用 reflect 解锁
+            turn3_last_parts.extend(kwargs["contents"][-1].parts or [])
             yield message_done(
                 function_calls=[
                     types.FunctionCall(
@@ -633,6 +637,15 @@ async def test_error_reflection_locks_mutating_tools_until_reflect_called(
     assert "edit_file" not in declared_tool_names_by_turn[2]
     assert "reflect" in declared_tool_names_by_turn[2]
     assert "edit_file" in declared_tool_names_by_turn[3]
+
+    # 验证全流程 5 轮中 system_prompt 完全固定不变，且反思切入通知通过历史尾部 <runtime-notice> 传达
+    assert len(system_prompts_by_turn) == 5
+    assert len(set(system_prompts_by_turn)) == 1
+    assert turn3_last_parts[-1].text is not None
+    assert "<runtime-notice>" in turn3_last_parts[-1].text
+    assert "`edit_file`" in turn3_last_parts[-1].text
+    assert "切换至只读反思阶段（reflecting）" in turn3_last_parts[-1].text
+    assert "not_exist = 999" not in turn3_last_parts[-1].text
 
     blocked_write = [
         e
@@ -850,3 +863,99 @@ async def test_two_stage_web_search_then_fetch_web_page_in_loop(monkeypatch):
     assert events[-1].type == "run.completed"
     assert events[-1].result is not None
     assert events[-1].result.reason == "completed"
+
+
+@pytest.mark.asyncio
+async def test_same_batch_reflect_and_failing_tool_ends_in_reflecting_with_notice(
+    monkeypatch,
+    tmp_path,
+):
+    """验证同一轮同时调用失败工具与 reflect 时，事件顺序一致且最终状态保持 reflecting 并附带 <runtime-notice>。"""
+
+    missing = tmp_path / "missing.txt"
+    call_count = 0
+    turn3_last_parts: list[types.Part] = []
+
+    async def fake_stream_message(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            yield message_done(
+                function_calls=[
+                    create_plan_call("读取并处理文件", "读取目标文件"),
+                    types.FunctionCall(
+                        name="read_file",
+                        args={"path": str(missing)},
+                    ),
+                ]
+            )
+        elif call_count == 2:
+            # 此时处于 reflecting，同一批里先调了再次失败的 read_file，又调了 reflect
+            yield message_done(
+                function_calls=[
+                    types.FunctionCall(
+                        name="read_file",
+                        args={"path": str(missing)},
+                    ),
+                    types.FunctionCall(
+                        name="reflect",
+                        args={
+                            "observation": "首次读取文件不存在",
+                            "diagnosis": "路径不存在",
+                            "strategy": "retry",
+                            "next_action": "跳过读取完成步骤",
+                        },
+                    ),
+                ]
+            )
+        elif call_count == 3:
+            turn3_last_parts.extend(kwargs["contents"][-1].parts or [])
+            yield message_done(
+                function_calls=[
+                    types.FunctionCall(
+                        name="reflect",
+                        args={
+                            "observation": "第二次读取依然不存在",
+                            "diagnosis": "无需读取该缺失文件",
+                            "strategy": "complete",
+                            "next_action": "将步骤标记为 skipped 并结束",
+                            "step_id": "step-1",
+                            "step_status": "skipped",
+                        },
+                    )
+                ]
+            )
+        else:
+            yield message_done(
+                contents="已跳过缺失文件并完成任务",
+                raw_parts=[
+                    types.Part.from_text(text="已跳过缺失文件并完成任务")
+                ],
+            )
+
+    monkeypatch.setattr(
+        agent_service.core.agentic_loop,
+        "stream_message",
+        fake_stream_message,
+    )
+
+    events = [
+        event
+        async for event in query(
+            initial_contents(),
+            tools=get_function_declarations(),
+        )
+    ]
+
+    reflection_events = [e for e in events if e.type == "reflection.updated"]
+    # Turn 1: enter reflecting -> Turn 2: reflect (executing) then deferred read_file error (reflecting) -> Turn 3: reflect (executing)
+    assert [e.phase for e in reflection_events] == [
+        "reflecting",
+        "executing",
+        "reflecting",
+        "executing",
+    ]
+    assert turn3_last_parts[-1].text is not None
+    assert "<runtime-notice>" in turn3_last_parts[-1].text
+    assert "`read_file`" in turn3_last_parts[-1].text
+    assert events[-1].type == "run.completed"

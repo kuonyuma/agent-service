@@ -52,6 +52,8 @@ async def stream_message(
     calls: list = []
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_tokens: int = 0
+    has_cached_tokens: bool = False
     stop: str = "message_done"
 
     async for chunk in response:
@@ -62,6 +64,12 @@ async def stream_message(
             output_tokens = getattr(
                 chunk.usage_metadata, "candidates_token_count", output_tokens
             )
+            raw_cached = getattr(
+                chunk.usage_metadata, "cached_content_token_count", None
+            )
+            if isinstance(raw_cached, int):
+                cached_tokens = raw_cached
+                has_cached_tokens = True
         if chunk.candidates:
             candidate = chunk.candidates[0]
             if candidate.finish_reason:
@@ -82,10 +90,17 @@ async def stream_message(
                             name=fc.name or "",
                         )
 
+    usage_payload: dict[str, Any] = {
+        "input_len": input_tokens,
+        "output_len": output_tokens,
+    }
+    if has_cached_tokens:
+        usage_payload["cached_len"] = cached_tokens
+
     result = StreamResult(
         contents=full_text,
         stop_reason="tool_use" if calls else stop,
-        usage={"input_len": input_tokens, "output_len": output_tokens},
+        usage=usage_payload,
         function_calls=calls,
         raw_parts=full_parts,
     )
