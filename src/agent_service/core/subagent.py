@@ -1,10 +1,12 @@
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 from google.genai import types
 
+from agent_service.core.control import RunControl
 from agent_service.core.plan import ExecutionPlan
 from agent_service.tools.base import Tool
 
@@ -225,6 +227,7 @@ class SubagentManager:
         event_forwarder: Callable[[Any], Awaitable[None]] | None = None,
         query_runner: QueryRunner | None = None,
         max_concurrent_subagents: int = 4,
+        run_control: RunControl | None = None,
     ) -> None:
         # 来自父级的资源
         self.parent_registry = dict(parent_registry) #父级工具仓库
@@ -234,6 +237,7 @@ class SubagentManager:
         self.permission_check = permission_check  # （危险操作审批员
         self.event_forwarder = event_forwarder # 事件转发回调函数
         self._query_runner = query_runner # 大模型循环执行器
+        self.run_control = run_control
 
         #调度器特有的字段
         self.max_concurrent_subagents = max(1, max_concurrent_subagents) # 最大并发上限
@@ -512,7 +516,7 @@ class SubagentManager:
             forwarded_call_ids: set[str] = set()
             final_result = None
 
-            async for event in query_fn(
+            async with aclosing(query_fn(
                 contents=next_history,
                 tools=child_tools,
                 permission_check=self.permission_check,
@@ -523,39 +527,41 @@ class SubagentManager:
                 plan_and_execute=profile.plan_and_execute,
                 graceful_final_turn=profile.graceful_final_turn,
                 inbox=session.inbox,
-            ):
-                if event.type == "text.delta" and event.text:
-                    streamed_chunks.append(event.text)
-                elif (
-                    event.type == "tool.requested"
-                    and event.requires_approval# 危险工具需要人工审批
-                    and self.event_forwarder is not None # 存在向外传声的通道存在
-                ):
-                    forwarded_call_ids.add(event.tool_call_id)
-                    await self.event_forwarder(event) # 将事件推给外面
-                elif event.type == "tool.completed":
-                    if (
-                        event.tool_result is not None
-                        and not event.tool_result.is_error
-                        and self.parent_plan is not None
+                run_control=RunControl(parent=self.run_control) if self.run_control else None,
+            )) as child_stream:
+                async for event in child_stream:
+                    if event.type == "text.delta" and event.text:
+                        streamed_chunks.append(event.text)
+                    elif (
+                        event.type == "tool.requested"
+                        and event.requires_approval# 危险工具需要人工审批
+                        and self.event_forwarder is not None # 存在向外传声的通道存在
                     ):
-                        if event.tool_name in {"edit_file", "write_file"}:
-                            self.parent_plan.record_edit(
-                                str(event.tool_arguments.get("path", "")) # 标记修改
-                            )
-                        elif event.tool_name in {
-                            "read_file",
-                            "quality_check",
-                            "run_command",
-                        }:
-                            self.parent_plan.mark_verified() # 验证修改完毕
-                    if (
-                        event.tool_call_id in forwarded_call_ids
-                        and self.event_forwarder is not None
-                    ):
-                        await self.event_forwarder(event) # 向外传递工具执行完毕事件
-                elif event.type in {"run.completed", "run.failed"}:
-                    final_result = event.result
+                        forwarded_call_ids.add(event.tool_call_id)
+                        await self.event_forwarder(event) # 将事件推给外面
+                    elif event.type == "tool.completed":
+                        if (
+                            event.tool_result is not None
+                            and not event.tool_result.is_error
+                            and self.parent_plan is not None
+                        ):
+                            if event.tool_name in {"edit_file", "write_file"}:
+                                self.parent_plan.record_edit(
+                                    str(event.tool_arguments.get("path", "")) # 标记修改
+                                )
+                            elif event.tool_name in {
+                                "read_file",
+                                "quality_check",
+                                "run_command",
+                            }:
+                                self.parent_plan.mark_verified() # 验证修改完毕
+                        if (
+                            event.tool_call_id in forwarded_call_ids
+                            and self.event_forwarder is not None
+                        ):
+                            await self.event_forwarder(event) # 向外传递工具执行完毕事件
+                    elif event.type in {"run.completed", "run.failed"}:
+                        final_result = event.result
 
             if final_result is not None:
                 session.history = list(final_result.history)

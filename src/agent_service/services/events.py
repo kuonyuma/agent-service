@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 RunStreamEventType = Literal[
+    "safety.blocked",
     "text.delta",
     "tool.requested",
     "tool.approval_required",

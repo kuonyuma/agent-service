@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any, Literal
@@ -10,6 +11,7 @@ from google.genai import types
 
 from agent_service.client.stream_message import StreamResult, stream_message
 from agent_service.config.settings import settings
+from agent_service.core.control import RunControl
 from agent_service.core.plan import AgentPhase, ExecutionPlan
 from agent_service.core.subagent import SubagentManager
 from agent_service.errors import (
@@ -76,6 +78,7 @@ class ToolApprovalRequest:
 
 PermissionCheck = Callable[[ToolApprovalRequest], Awaitable[bool]]
 LoopEventType = Literal[
+    "safety.blocked",
     "text.delta",
     "plan.updated",
     "reflection.updated",
@@ -98,6 +101,7 @@ class LoopResult:
     usage: dict[str, int] = field(default_factory=dict)
     error: AgentServiceError | None = None
     plan: ExecutionPlan | None = None
+    safety_usage: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,8 @@ class LoopEvent:
     approval_request_hash: str = ""
     tool_result: ToolResult | None = None
     result: LoopResult | None = None
+    safety_code: str = ""
+    safety_category: str = ""
 
 
 def _usage_value(usage: dict[str, Any], key: str) -> int:
@@ -351,6 +357,7 @@ async def query(
     graceful_final_turn: bool = False,
     inbox: asyncio.Queue[str] | None = None,
     subagent_manager: SubagentManager | None = None,
+    run_control: RunControl | None = None,
 ) -> AsyncGenerator[LoopEvent]:
     """让 Agent 真正跑起来的核心循环：不断“问大模型 -> 调工具 -> 把结果喂回大模型”，直到任务完成。
 
@@ -383,6 +390,9 @@ async def query(
     initial_history_length = len(history)
     usage = {"input_len": 0, "output_len": 0}
     completed_turns = 0
+    if run_control is not None:
+        run_control.ensure_running()
+        run_control.capture(history, [], 0, usage)
 
     base_registry = (# 准备基础工具
         dict(tool_registry) if tool_registry is not None else dict(TOOL_REGISTRY)
@@ -441,6 +451,7 @@ async def query(
                 permission_check=permission_check,
                 event_forwarder=_forward_subagent_event,
                 query_runner=query,
+                run_control=run_control,
             )
             owns_subagent_manager = True
         base_registry["subagent"] = SubagentTool(active_subagent_manager)
@@ -517,26 +528,23 @@ async def query(
                 )
 
             result: StreamResult | None = None
-            async for event in stream_message( # 请求llm
+            if run_control is not None:
+                run_control.ensure_running()
+            async with aclosing(stream_message(
                 contents=history,
                 tools=turn_tools,
                 system_prompt=base_system_prompt,
                 max_tokens=settings.model_config.max_tokens,
-            ):
-                if event.type == "text":
-                    yield LoopEvent(
-                        type="text.delta",
-                        text=event.text,
-                        turn=turn,
-                        phase=plan_state.phase, # 交代当前的状态
-                        plan=( # 返回copy状态机信息
-                            plan_state.snapshot()
-                            if plan_state.has_state()
-                            else None
-                        ),
-                    )
-                elif event.type == "message_done":
-                    result = event.result
+            )) as model_stream:
+                async for event in model_stream:
+                    if event.type == "text":
+                        yield LoopEvent(
+                            type="text.delta", text=event.text, turn=turn,
+                            phase=plan_state.phase,
+                            plan=plan_state.snapshot() if plan_state.has_state() else None,
+                        )
+                    elif event.type == "message_done":
+                        result = event.result
 
             if result is None:
                 raise AgentRuntimeError("Agent 循环没有收到模型的完成结果。")
@@ -548,6 +556,14 @@ async def query(
                     "cached_len", 0
                 ) + _usage_value(result.usage, "cached_len")
             history.append(types.Content(role="model", parts=result.raw_parts))
+            if run_control is not None:
+                run_control.turns = turn
+                run_control.usage = _merged_usage(usage, active_subagent_manager)
+                if not result.function_calls:
+                    run_control.capture(
+                        history, history[initial_history_length:], turn,
+                        _merged_usage(usage, active_subagent_manager),
+                    )
 
             if not result.function_calls: # 模型打算结束这次任务
                 if ( # 如果使用反思功能且处于反思状态，并且还未纠正过，且还可以循环，就触发反思提醒
@@ -748,8 +764,10 @@ async def query(
                         allowed_tool_names=allowed_tool_names,
                         approved_tool_call_ids=frozenset(approved_call_ids),
                         tool_registry=active_registry,
+                        run_control=run_control,
                     )
                 )
+                queue_get_task = None
                 try:
                     while not exec_task.done():
                         queue_get_task = asyncio.create_task(
@@ -779,6 +797,9 @@ async def query(
                             ack.set()
                     batch = await exec_task
                 finally:
+                    if queue_get_task is not None and not queue_get_task.done():
+                        queue_get_task.cancel()
+                        await asyncio.gather(queue_get_task, return_exceptions=True)
                     if not exec_task.done():
                         exec_task.cancel()
                         try:
@@ -954,6 +975,11 @@ async def query(
                 )
 
             history.append(types.Content(role="user", parts=tool_parts))
+            if run_control is not None:
+                run_control.capture(
+                    history, history[initial_history_length:], turn,
+                    _merged_usage(usage, active_subagent_manager),
+                )
 
         max_turns_error = AgentRuntimeError(
             f"Agent 已达到最大运行轮数 {max_turns}，任务仍未完成。"

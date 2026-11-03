@@ -17,6 +17,14 @@ class InvalidToolCallError(AgentRuntimeError):
     """模型返回了无法执行的工具调用。"""
 
 
+class SafetyBlockedError(AgentRuntimeError):
+    """模型输出命中安全审核规则。"""
+
+
+class SafetyReviewError(AgentRuntimeError):
+    """无法可靠完成输出文本审核。"""
+
+
 class ConversationNotFoundError(AgentServiceError):
     """指定会话不存在。"""
 

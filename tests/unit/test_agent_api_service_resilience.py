@@ -72,7 +72,7 @@ async def test_stream_always_finishes_when_failure_persistence_also_fails(
     assert sentinel is None
 
 
-def test_closing_full_event_queue_makes_room_for_sentinel():
+def test_closing_full_event_queue_preserves_events_before_shutdown():
     queue: asyncio.Queue[RunStreamEvent | None] = asyncio.Queue(maxsize=1)
     queue.put_nowait(
         RunStreamEvent(
@@ -84,4 +84,7 @@ def test_closing_full_event_queue_makes_room_for_sentinel():
 
     AgentAPIService._close_event_queue(queue)
 
-    assert queue.get_nowait() is None
+    event = queue.get_nowait()
+    assert event is not None and event.type == "text.delta"
+    with pytest.raises(asyncio.QueueShutDown):
+        queue.get_nowait()

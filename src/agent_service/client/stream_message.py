@@ -56,39 +56,44 @@ async def stream_message(
     has_cached_tokens: bool = False
     stop: str = "message_done"
 
-    async for chunk in response:
-        if chunk.usage_metadata:
-            input_tokens = getattr(
-                chunk.usage_metadata, "prompt_token_count", input_tokens
-            )
-            output_tokens = getattr(
-                chunk.usage_metadata, "candidates_token_count", output_tokens
-            )
-            raw_cached = getattr(
-                chunk.usage_metadata, "cached_content_token_count", None
-            )
-            if isinstance(raw_cached, int):
-                cached_tokens = raw_cached
-                has_cached_tokens = True
-        if chunk.candidates:
-            candidate = chunk.candidates[0]
-            if candidate.finish_reason:
-                stop = str(candidate.finish_reason)
-            if candidate.content and candidate.content.parts:
-                parts = candidate.content.parts
-                for part in parts:
-                    full_parts.append(part)
-                    if part.text:
-                        full_text += part.text
-                        yield StreamEvent(type="text", text=part.text)
-                    if part.function_call:
-                        fc = part.function_call
-                        calls.append(fc)
-                        yield StreamEvent(
-                            type="tool_use_start",
-                            id=fc.id or "",
-                            name=fc.name or "",
-                        )
+    try:
+        async for chunk in response:
+            if chunk.usage_metadata:
+                input_tokens = getattr(
+                    chunk.usage_metadata, "prompt_token_count", input_tokens
+                )
+                output_tokens = getattr(
+                    chunk.usage_metadata, "candidates_token_count", output_tokens
+                )
+                raw_cached = getattr(
+                    chunk.usage_metadata, "cached_content_token_count", None
+                )
+                if isinstance(raw_cached, int):
+                    cached_tokens = raw_cached
+                    has_cached_tokens = True
+            if chunk.candidates:
+                candidate = chunk.candidates[0]
+                if candidate.finish_reason:
+                    stop = str(candidate.finish_reason)
+                if candidate.content and candidate.content.parts:
+                    parts = candidate.content.parts
+                    for part in parts:
+                        full_parts.append(part)
+                        if part.text:
+                            full_text += part.text
+                            yield StreamEvent(type="text", text=part.text)
+                        if part.function_call:
+                            fc = part.function_call
+                            calls.append(fc)
+                            yield StreamEvent(
+                                type="tool_use_start",
+                                id=fc.id or "",
+                                name=fc.name or "",
+                            )
+    finally:
+        close_stream = getattr(response, "aclose", None)
+        if close_stream is not None:
+            await close_stream()
 
     usage_payload: dict[str, Any] = {
         "input_len": input_tokens,

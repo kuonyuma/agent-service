@@ -10,6 +10,7 @@ from agent_service.api.logging import configure_logging, request_id_middleware
 from agent_service.api.routes import router
 from agent_service.config.api_settings import APISettings
 from agent_service.config.settings import settings as runtime_settings
+from agent_service.core.coordinator import RunCoordinator
 from agent_service.core.runner import AgentRunner
 from agent_service.db import create_database
 from agent_service.errors import (
@@ -64,9 +65,7 @@ def create_app(
             web_tool_rules.append(
                 "质量检查只允许 ruff、pyright 固定动作，并且必须逐次审批。"
             )
-        web_tool_rules.append(
-            "不要请求任意命令，也不要访问工作区之外的路径。"
-        )
+        web_tool_rules.append("不要请求任意命令，也不要访问工作区之外的路径。")
         runner = AgentRunner(
             allowed_tool_names=frozenset(web_tool_registry),
             tool_registry=web_tool_registry,
@@ -78,11 +77,9 @@ def create_app(
         )
         app.state.agent_api_service = AgentAPIService(
             database,
-            runner,
+            RunCoordinator(runner),
             run_timeout_seconds=current_settings.run_timeout_seconds,
-            approval_timeout_seconds=(
-                current_settings.approval_timeout_seconds
-            ),
+            approval_timeout_seconds=(current_settings.approval_timeout_seconds),
             approval_poll_interval_seconds=(
                 current_settings.approval_poll_interval_seconds
             ),

@@ -11,6 +11,8 @@ flowchart LR
     API[FastAPI 路由层]
     Service[AgentAPIService<br/>应用服务层]
     Runner[AgentRunner<br/>Agent 运行时]
+    Coordinator[RunCoordinator<br/>事件分发与终止]
+    Safety[GeminiTextReviewer<br/>无工具独立审核请求]
     Gemini[Gemini API]
     Tools[显式 Web 工具表<br/>工作区路径策略]
     Factory[AsyncSession Factory]
@@ -20,7 +22,10 @@ flowchart LR
     API --> Service
     Service -->|创建短生命周期 Session| Factory
     Factory --> DB
-    Service --> Runner
+    Service --> Coordinator
+    Coordinator --> Runner
+    Coordinator --> Safety
+    Safety --> Gemini
     Runner -->|流式生成| Gemini
     Runner --> Tools
     Service -->|SSE 事件流| API
@@ -32,6 +37,7 @@ flowchart LR
 - **FastAPI 路由层**负责 HTTP 参数校验、状态码和 `StreamingResponse`，不承载 Agent 循环，也不把路由依赖注入的数据库 Session 传入整个流式生成过程。
 - **AgentAPIService**协调会话、消息、run 状态与持久化。它持有 Session Factory，需要访问数据库时才创建 Session，并用短事务完成一次明确的写入。
 - **AgentRunner**运行 Agent 循环，调用 Gemini、执行工具并产生运行事件；它不负责数据库事务。
+- **RunCoordinator**独占读取 Runner 事件，并发审核 `text.delta`，管理审批取消、工具终止门闩和唯一终态；详细边界见 [异步输出审核](safety.md)。
 - **SQLAlchemy 2.0 / MySQL**保存会话、消息、run 和工具调用记录。一个异步任务使用一个 `AsyncSession`，Session 不跨并发任务共享。
 - **SSE**把运行事件逐条推送给客户端。非终态事件可以随生成过程发送；终态事件应在对应的最终状态已经持久化后发送。
 

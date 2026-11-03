@@ -5,6 +5,7 @@ from typing import Any
 
 from google.genai import types
 
+from agent_service.core.control import RunControl
 from agent_service.tools.base import Tool, ToolResult
 from agent_service.tools.index import TOOL_REGISTRY
 
@@ -49,6 +50,7 @@ async def execute_tools(
     approved_tool_call_ids: frozenset[str] = frozenset(),
     tool_registry: Mapping[str, Tool] | None = None,
     max_concurrency: int = 4,
+    run_control: RunControl | None = None,
 ) -> ToolExecutionBatch:
     active_registry = tool_registry if tool_registry is not None else TOOL_REGISTRY
     semaphore = asyncio.Semaphore(max(1, max_concurrency))
@@ -74,6 +76,8 @@ async def execute_tools(
             )
         else:
             async with semaphore:
+                if run_control is not None:
+                    run_control.ensure_running()
                 result = await t.run(parameter=args)
 
         execution = ToolExecution(

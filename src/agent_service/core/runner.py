@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator, Mapping
+from contextlib import aclosing
 from types import TracebackType
 from typing import Self
 
@@ -12,6 +13,7 @@ from agent_service.core.agentic_loop import (
     query,
 )
 from agent_service.core.context import compress_context
+from agent_service.core.control import RunControl
 from agent_service.errors import AgentRuntimeError, AgentServiceError
 from agent_service.tools.base import Tool
 from agent_service.tools.index import get_function_declarations
@@ -45,6 +47,7 @@ class AgentRunner:
         history: list[types.Content],
         user_query: str,
         permission_check: PermissionCheck | None = None,
+        run_control: RunControl | None = None,
     ) -> AsyncGenerator[LoopEvent]:
         """基于历史运行一轮，并通过最终事件显式返回新历史。"""
 
@@ -62,17 +65,21 @@ class AgentRunner:
             yield self._failed_event(next_history, runtime_error)
             return
 
-        async for event in query(
-            contents=next_history,
-            tools=self.tools,
-            permission_check=permission_check,
-            allowed_tool_names=self.allowed_tool_names,
-            tool_registry=self.tool_registry,
-            system_prompt=self.system_prompt,
-            max_turns=self.max_turns,
-            plan_and_execute=self.plan_and_execute,
-        ):
-            yield event
+        async with aclosing(
+            query(
+                contents=next_history,
+                tools=self.tools,
+                permission_check=permission_check,
+                allowed_tool_names=self.allowed_tool_names,
+                tool_registry=self.tool_registry,
+                system_prompt=self.system_prompt,
+                max_turns=self.max_turns,
+                plan_and_execute=self.plan_and_execute,
+                run_control=run_control,
+            )
+        ) as stream:
+            async for event in stream:
+                yield event
 
     async def close(self) -> None:
         """释放 Runner 使用的共享外部客户端。"""

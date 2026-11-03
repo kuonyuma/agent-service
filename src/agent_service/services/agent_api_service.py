@@ -16,6 +16,8 @@ from agent_service.core.agentic_loop import (
     LoopResult,
     ToolApprovalRequest,
 )
+from agent_service.core.control import RunControl
+from agent_service.core.coordinator import RunCoordinator
 from agent_service.core.runner import AgentRunner
 from agent_service.db import (
     AgentRun,
@@ -32,6 +34,8 @@ from agent_service.errors import (
     ConversationNotFoundError,
     PersistenceError,
     RunNotFoundError,
+    SafetyBlockedError,
+    SafetyReviewError,
     ToolCallNotFoundError,
 )
 from agent_service.services.content_mapper import (
@@ -68,7 +72,7 @@ class AgentAPIService:
     def __init__(
         self,
         database: Database,
-        runner: AgentRunner,
+        runner: AgentRunner | RunCoordinator,
         *,
         run_timeout_seconds: float = 120.0,
         approval_timeout_seconds: float = 60.0,
@@ -313,9 +317,7 @@ class AgentAPIService:
                         )
                     )
                 if tool_call is None:
-                    raise PersistenceError(
-                        f"找不到工具审批记录：{request.call_id}"
-                    )
+                    raise PersistenceError(f"找不到工具审批记录：{request.call_id}")
                 if tool_call.approval_request_hash != request.request_hash:
                     raise PersistenceError("工具审批参数指纹不一致，已拒绝执行。")
 
@@ -609,12 +611,22 @@ class AgentAPIService:
         queue: asyncio.Queue[RunStreamEvent | None] = asyncio.Queue(
             maxsize=self.stream_event_buffer_size
         )
-        producer = asyncio.create_task(self._produce_run(prepared, queue))
+        run_control = RunControl()
+        producer = asyncio.create_task(self._produce_run(prepared, queue, run_control))
         try:
             while True:
-                event = await queue.get()
+                try:
+                    event = await queue.get()
+                except asyncio.QueueShutDown:
+                    break
                 if event is None:
                     break
+                if run_control.safety_stopped and event.type in {
+                    "text.delta",
+                    "tool.requested",
+                    "tool.approval_required",
+                }:
+                    continue
                 yield event
         finally:
             if not producer.done():
@@ -628,6 +640,7 @@ class AgentAPIService:
         self,
         prepared: PreparedRun,
         queue: asyncio.Queue[RunStreamEvent | None],
+        run_control: RunControl | None = None,
     ) -> None:
         """事务外生产事件；Runner 等待与 SSE 背压分别计时。"""
 
@@ -639,6 +652,11 @@ class AgentAPIService:
             permission_check=lambda request: self._wait_for_approval(
                 prepared,
                 request,
+            ),
+            **(
+                {"run_control": run_control}
+                if isinstance(self.runner, RunCoordinator)
+                else {}
             ),
         )
         try:
@@ -667,6 +685,12 @@ class AgentAPIService:
                     )
                 elif event.type == "tool.completed":
                     await self._save_tool_completed(prepared.run_id, event)
+                elif event.type == "safety.blocked":
+                    if event.result is None:
+                        raise AgentRuntimeError("安全拦截事件缺少处理后的历史。")
+                    # 不让网络背压或随后断线把已拦截的运行写成 cancelled。
+                    await self._finish_run(prepared, event.result, "failed")
+                    terminal_saved = True
                 elif event.type in {"run.completed", "run.failed"}:
                     result = event.result
                     if result is None:
@@ -677,7 +701,8 @@ class AgentAPIService:
                         and result.reason == "completed"
                         else "failed"
                     )
-                    await self._finish_run(prepared, result, status)
+                    if not terminal_saved:
+                        await self._finish_run(prepared, result, status)
                     terminal_saved = True
 
                 await queue.put(
@@ -697,7 +722,7 @@ class AgentAPIService:
                             approval_expires_at,
                         )
                     )
-                if terminal_saved:
+                if terminal_saved and event.type in {"run.completed", "run.failed"}:
                     return
 
             if remaining_runner_seconds <= 0:
@@ -709,9 +734,7 @@ class AgentAPIService:
             )
             terminal_saved = await self._safe_mark_failed(prepared, error)
             sequence += 1
-            await queue.put(
-                self._failed_stream_event(prepared.run_id, sequence, error)
-            )
+            await queue.put(self._failed_stream_event(prepared.run_id, sequence, error))
         except asyncio.CancelledError:
             try:
                 await self._cancel_with_shield(prepared)
@@ -730,9 +753,7 @@ class AgentAPIService:
             )
             terminal_saved = await self._safe_mark_failed(prepared, error)
             sequence += 1
-            await queue.put(
-                self._failed_stream_event(prepared.run_id, sequence, error)
-            )
+            await queue.put(self._failed_stream_event(prepared.run_id, sequence, error))
         finally:
             try:
                 try:
@@ -807,9 +828,7 @@ class AgentAPIService:
                             update(AgentRun)
                             .where(
                                 AgentRun.id == run_id,
-                                AgentRun.status.in_(
-                                    ("running", "waiting_approval")
-                                ),
+                                AgentRun.status.in_(("running", "waiting_approval")),
                             )
                             .values(status="waiting_approval")
                         ),
@@ -836,7 +855,9 @@ class AgentAPIService:
             completed_status = (
                 "rejected"
                 if approval_status in {"rejected", "expired"}
-                else "failed" if tool_result.is_error else "completed"
+                else "failed"
+                if tool_result.is_error
+                else "completed"
             )
             update_result = cast(
                 CursorResult[Any],
@@ -936,12 +957,17 @@ class AgentAPIService:
 
             if status == "failed":
                 now = _utc_now()
+                safety_stopped = isinstance(
+                    result.error, (SafetyBlockedError, SafetyReviewError)
+                )
                 await self._cancel_pending_approvals(
                     session,
                     prepared.run_id,
                     now=now,
-                    actor="system_failure",
-                    reason="运行失败，待审批调用已取消。",
+                    actor="safety_stop" if safety_stopped else "system_failure",
+                    reason="安全审核中止运行，待审批调用已取消。"
+                    if safety_stopped
+                    else "运行失败，待审批调用已取消。",
                 )
                 await session.execute(
                     update(ToolCall)
@@ -950,7 +976,7 @@ class AgentAPIService:
                         ToolCall.status.in_(("requested", "waiting_approval")),
                     )
                     .values(
-                        status="failed",
+                        status="cancelled" if safety_stopped else "failed",
                         is_error=True,
                         completed_at=now,
                     )
@@ -1136,13 +1162,11 @@ class AgentAPIService:
     def _close_event_queue(
         queue: asyncio.Queue[RunStreamEvent | None],
     ) -> None:
-        """保证消费者最终收到结束标记；满队列时丢弃最旧的非终态事件。"""
+        """满队列时温和关闭，保留安全事件与唯一终态，消费者排空后退出。"""
 
         if queue.full():
-            try:
-                queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
+            queue.shutdown()
+            return
         queue.put_nowait(None)
 
     @staticmethod
@@ -1155,7 +1179,15 @@ class AgentAPIService:
             "run_id": run_id,
             "turn": event.turn,
         }
-        if event.type == "text.delta":
+        if event.type == "safety.blocked":
+            data.update(
+                {
+                    "message": event.text,
+                    "code": event.safety_code,
+                    "category": event.safety_category,
+                }
+            )
+        elif event.type == "text.delta":
             data["text"] = event.text
         elif event.type == "tool.requested":
             data.update(
@@ -1188,6 +1220,7 @@ class AgentAPIService:
                     "reason": result.reason,
                     "turns": result.turns,
                     "usage": result.usage,
+                    "safety_usage": result.safety_usage,
                     "error": str(result.error) if result.error else None,
                 }
             )

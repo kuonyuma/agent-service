@@ -8,8 +8,10 @@ from rich.live import Live
 from rich.markdown import Markdown
 
 from agent_service.core.agentic_loop import LoopResult, ToolApprovalRequest
+from agent_service.core.coordinator import RunCoordinator
 from agent_service.core.plan import AgentPhase, ExecutionPlan
 from agent_service.core.runner import AgentRunner
+from agent_service.safety.reviewer import TextReviewer
 
 console = Console()
 
@@ -38,10 +40,14 @@ def _phase_label(phase: AgentPhase) -> str:
 
 
 class App:
-    def __init__(self, runner: AgentRunner | None = None) -> None:
+    def __init__(
+        self, runner: AgentRunner | None = None, reviewer: TextReviewer | None = None
+    ) -> None:
         self.contents: list[types.Content] = []
         self.session = PromptSession()
         self.runner = runner or AgentRunner()
+        self.coordinator = RunCoordinator(self.runner, reviewer)
+        self._safety_stopped = False
         self._active_live: Live | None = None
         self._approval_lock = asyncio.Lock()
 
@@ -57,6 +63,7 @@ class App:
             await self.run_turn(user_text)
 
     async def run_turn(self, user_query: str):
+        self._safety_stopped = False
         result: LoopResult | None = None
         full_text: str = ""
         current_plan: ExecutionPlan | None = None
@@ -64,18 +71,30 @@ class App:
             _build_display_markdown(full_text, current_plan),
             console=console,
             refresh_per_second=15,
+            screen=True,
+            transient=True,
         ) as live:
             self._active_live = live
             try:
-                async for loop_event in self.runner.run_turn(
+                async for loop_event in self.coordinator.run_turn(
                     history=self.contents,
                     user_query=user_query,
                     permission_check=self.permission_check,
                 ):
-                    if loop_event.plan is not None:
+                    if loop_event.plan is not None and not self._safety_stopped:
                         current_plan = loop_event.plan
 
-                    if loop_event.type == "text.delta":
+                    if loop_event.type == "safety.blocked":
+                        self._safety_stopped = True
+                        full_text = loop_event.text
+                        current_plan = None
+                        live.update(
+                            _build_display_markdown(full_text, current_plan),
+                            refresh=True,
+                        )
+                        if not live.is_started:
+                            live.start()
+                    elif loop_event.type == "text.delta" and not self._safety_stopped:
                         full_text += loop_event.text
                         live.update(_build_display_markdown(full_text, current_plan))
                     elif loop_event.type == "plan.updated":
@@ -97,8 +116,14 @@ class App:
                     elif loop_event.type == "tool.requested":
                         if loop_event.tool_name == "subagent":
                             args = loop_event.tool_arguments
-                            role = args.get("role") or args.get("agent_id") or "explorer"
-                            desc = args.get("description") or args.get("action") or "协同执行"
+                            role = (
+                                args.get("role") or args.get("agent_id") or "explorer"
+                            )
+                            desc = (
+                                args.get("description")
+                                or args.get("action")
+                                or "协同执行"
+                            )
                             hint = f"{_phase_label(loop_event.phase)}：🤖 子代理 `{role}`（{desc}）运行中.."
                         else:
                             hint = f"{_phase_label(loop_event.phase)}：模型调用工具 `{loop_event.tool_name}` 中.."
@@ -119,6 +144,12 @@ class App:
 
         if result:
             self.contents = result.history
+            console.print(_build_display_markdown(full_text, current_plan))
+            if self._safety_stopped:
+                console.print(
+                    "[yellow]本次运行已中止；部分工具操作可能已发生，请核实实际状态。[/yellow]"
+                )
+                return
             if result.reason == "error":
                 error_message = str(result.error) if result.error else "未知错误"
                 console.print(f"[red]任务出错：{error_message}[/red]")
@@ -138,5 +169,5 @@ class App:
                 answer: str = await self.session.prompt_async("是否允许执行？(y/n) > ")
                 return answer.strip().lower() == "y"
             finally:
-                if self._active_live is not None:
+                if self._active_live is not None and not self._safety_stopped:
                     self._active_live.start()

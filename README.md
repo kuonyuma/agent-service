@@ -48,6 +48,10 @@ $env:GEMINI_API_KEY = "your_api_key_here"
 CLI 和 HTTP API 使用同一个 `AgentRunner`。调用方传入的历史不会被隐式修改，
 最终的 `LoopResult` 会分别给出完整运行历史和本轮 `new_contents`。
 
+两个应用入口都通过 `RunCoordinator` 并发审核模型输出文本，复用当前 Gemini
+连接和模型，拦截或审核失败时停止运行并替换回答。文字可能在审核完成前短暂可见。
+配置、事件、历史处理和测试边界见 [异步输出审核](docs/safety.md)。
+
 ## 一键启动 API 与 MySQL
 
 下面的命令会构建镜像、启动 MySQL 8.4、执行 `alembic upgrade head`，再启动 API：
