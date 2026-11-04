@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from math import isfinite
+from math import isfinite # isfinite(value) 用来判断一个数是不是有限数
 from pathlib import Path
 
 import yaml
@@ -16,33 +16,42 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class SafetyConfig:
-    chunk_chars: int = 800
-    interval_seconds: float = 1.5
-    timeout_seconds: float = 15.0
-    context_chars: int = 1200
-    max_buffer_chars: int = 16000
+    chunk_chars: int = 800 # 定量触发阈值
+    interval_seconds: float = 1.5 #  定时触发阈值
+    timeout_seconds: float = 15.0 #  单次审核请求超时死线
+    context_chars: int = 1200 #  滑动窗口上文长度
+    max_buffer_chars: int = 16000 # 未审积压上限
 
     def __post_init__(self) -> None:
-        if (
-            any(
-                type(value) is not int
-                for value in (
-                    self.chunk_chars,
-                    self.context_chars,
-                    self.max_buffer_chars,
-                )
-            )
-            or any(
-                type(value) not in (int, float) or not isfinite(value)
-                for value in (self.interval_seconds, self.timeout_seconds)
-            )
-            or self.chunk_chars <= 0
+        # 1. 检查长度字段的类型
+        lengths = (
+            self.chunk_chars,
+            self.context_chars,
+            self.max_buffer_chars,
+        )
+        invalid_length_type = any(type(value) is not int for value in lengths)
+
+        # 2. 检查时间字段的类型和有限性
+        times = (self.interval_seconds, self.timeout_seconds)
+        invalid_time = any(
+            type(value) not in (int, float) or not isfinite(value)  
+            for value in times
+        )
+
+        if invalid_length_type or invalid_time:
+            raise ValueError("安全审核的长度或时间类型无效")
+
+        # 3. 检查数值范围与字段关系
+        invalid_range = (
+            self.chunk_chars <= 0
             or self.interval_seconds <= 0
             or self.timeout_seconds <= 0
             or self.context_chars < 0
             or self.max_buffer_chars < self.chunk_chars
-        ):
-            raise ValueError("安全审核的长度、时间和缓冲区配置无效")
+        )
+
+        if invalid_range:
+            raise ValueError("安全审核的长度、时间或缓冲区范围无效")
 
 
 @dataclass(frozen=True)
