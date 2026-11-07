@@ -45,7 +45,7 @@ class _RunState:
         self, error: SafetyBlockedError | SafetyReviewError, category: str = ""
     ) -> None:
         """先封闭工具入口，再取消生产者，不等待界面或网络消费。"""
-        if self.error is not None:
+        if self.error is not None: # 防止后续报错覆盖信息
             return
         self.error, self.category = error, category
         self.control.stopped = True
@@ -183,10 +183,9 @@ class RunCoordinator:
                             return
                         ack = asyncio.Event()
                         await queue.put((event, ack))
-                        # Web 提交工具请求后，生产者才能进入审批回调。
                         await ack.wait()
                 raise AgentRuntimeError("Agent 事件流未产生终态。")
-            except Exception as exc:  # noqa: BLE001 - 运行边界转换异常
+            except Exception as exc:  
                 state.final = LoopEvent(
                     type="run.failed",
                     result=LoopResult(
@@ -279,7 +278,7 @@ class RunCoordinator:
                         return
                     await state.changed.wait()
                     continue
-                remaining = (
+                remaining = ( # 时间
                     state.pending_since
                     + state.config.interval_seconds
                     - asyncio.get_running_loop().time()
@@ -297,7 +296,7 @@ class RunCoordinator:
                 batch, state.pending = state.pending, ""
                 text = state.context + batch
                 async with asyncio.timeout(state.config.timeout_seconds):
-                    result = await self.reviewer.check(text)
+                    result = await self.reviewer.check(text) # 调用审核llm
                 for key, value in result.usage.items():
                     state.safety_usage[key] = state.safety_usage.get(key, 0) + value
                 if result.verdict == "block":
