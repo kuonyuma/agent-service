@@ -5,23 +5,23 @@ import asyncio
 import pytest
 from google.genai import types
 
-from agent_service.core.agentic_loop import LoopEvent, LoopResult
-from agent_service.core.plan import ExecutionPlan
-from agent_service.core.subagent import (
+from agent_service.adapters.collaboration.manager import (
     ROLE_PROFILES,
     SubagentManager,
     resolve_subagent_tools,
 )
-from agent_service.tools.index import TOOL_REGISTRY
-from agent_service.tools.quality_check import QualityCheckTool
-from agent_service.tools.subagent_tool import SubagentTool
-from agent_service.tools.workspace import WorkspacePathPolicy
+from agent_service.adapters.security.workspace import WorkspacePathPolicy
+from agent_service.adapters.tools.index import create_tool_registry
+from agent_service.adapters.tools.quality_check import QualityCheckTool
+from agent_service.adapters.tools.subagent_tool import SubagentTool
+from agent_service.kernel.runtime.events import LoopEvent, LoopResult
+from agent_service.kernel.strategy.plan import ExecutionPlan
 
 
 def test_role_profiles_enforce_max_depth_and_tool_scoping(tmp_path):
     full_registry = {
-        **TOOL_REGISTRY,
-        "quality_check": QualityCheckTool(WorkspacePathPolicy(tmp_path)),
+        **create_tool_registry(),
+        "run_quality_check": QualityCheckTool(WorkspacePathPolicy(tmp_path)),
     }
 
     for role_name, profile in ROLE_PROFILES.items():
@@ -66,7 +66,7 @@ def test_role_profiles_enforce_max_depth_and_tool_scoping(tmp_path):
             "read_file",
             "write_file",
             "edit_file",
-            "quality_check",
+            "run_quality_check",
             "run_command",
         }
     )
@@ -77,7 +77,7 @@ def test_role_profiles_enforce_max_depth_and_tool_scoping(tmp_path):
         full_registry,
     )
     assert monitor_names == frozenset(
-        {"list_files", "read_file", "quality_check", "run_command"}
+        {"list_files", "read_file", "run_quality_check", "run_command"}
     )
     assert "write_file" not in monitor_names
     assert "edit_file" not in monitor_names
@@ -97,7 +97,7 @@ def test_privilege_attenuation_never_exceeds_parent_allowlist():
 
     _, worker_names, _ = resolve_subagent_tools(
         ROLE_PROFILES["worker"],
-        TOOL_REGISTRY,
+        create_tool_registry(),
         parent_allowed_tool_names=parent_allowed,
     )
     # 父代理未开放 write_file/edit_file 时，worker 子代理也绝不能越权获得
@@ -127,7 +127,7 @@ async def test_subagent_tool_blocks_non_readonly_roles_in_planning_and_reflectin
         )
 
     manager = SubagentManager(
-        TOOL_REGISTRY,
+        create_tool_registry(),
         parent_plan=plan,
         query_runner=fake_query,
     )
@@ -187,7 +187,7 @@ async def test_subagent_context_refs_and_session_resumption():
             ),
         )
 
-    manager = SubagentManager(TOOL_REGISTRY, query_runner=fake_query)
+    manager = SubagentManager(create_tool_registry(), query_runner=fake_query)
     tool = SubagentTool(manager)
 
     # 1. 先派发 explorer-1
@@ -249,7 +249,7 @@ async def test_background_subagent_inbox_and_wait():
             ),
         )
 
-    manager = SubagentManager(TOOL_REGISTRY, query_runner=fake_query)
+    manager = SubagentManager(create_tool_registry(), query_runner=fake_query)
     tool = SubagentTool(manager)
 
     # 后台启动 monitor-1

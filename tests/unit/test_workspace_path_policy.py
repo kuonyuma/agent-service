@@ -8,12 +8,15 @@ from typing import cast
 
 import pytest
 
-from agent_service.tools.edit_file import EditFileTool
-from agent_service.tools.list_files import ListFilesTool
-from agent_service.tools.read_file import ReadFileTool
-from agent_service.tools.workspace import WorkspacePathError, WorkspacePathPolicy
-from agent_service.tools.write_file import WriteFileTool
-from agent_service.tools.yaml_loader import LoadYamlTool
+from agent_service.adapters.security.workspace import (
+    WorkspacePathError,
+    WorkspacePathPolicy,
+)
+from agent_service.adapters.tools.edit_file import EditFileTool
+from agent_service.adapters.tools.list_files import ListFilesTool
+from agent_service.adapters.tools.read_file import ReadFileTool
+from agent_service.adapters.tools.write_file import WriteFileTool
+from agent_service.adapters.tools.yaml_loader import LoadYamlTool
 
 
 def test_policy_accepts_relative_existing_path(tmp_path: Path) -> None:

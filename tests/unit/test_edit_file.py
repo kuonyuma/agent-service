@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent_service.tools.edit_file import EditFileTool
+from agent_service.adapters.tools.edit_file import EditFileTool
 
 
 @pytest.mark.asyncio

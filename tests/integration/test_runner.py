@@ -3,9 +3,9 @@
 import pytest
 from google.genai import types
 
-import agent_service.core.agentic_loop
-from agent_service.client.stream_message import StreamEvent, StreamResult
-from agent_service.core.runner import AgentRunner
+import agent_service.adapters.gemini.model
+from agent_service.kernel.model.port import StreamEvent, StreamResult
+from tests.support import create_runner, get_function_declarations
 
 
 @pytest.mark.asyncio
@@ -27,7 +27,7 @@ async def test_runner_returns_new_history_without_modifying_input(monkeypatch):
         )
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
@@ -41,7 +41,7 @@ async def test_runner_returns_new_history_without_modifying_input(monkeypatch):
             parts=[types.Part.from_text(text="旧回答")],
         ),
     ]
-    runner = AgentRunner(tools=[], system_prompt="仅允许只读工具")
+    runner = create_runner(tools=get_function_declarations(), system_prompt="仅允许只读工具")
 
     events = [
         event
@@ -113,11 +113,11 @@ async def test_runner_keeps_system_prompt_fixed_and_passes_plan_via_tool_result(
             )
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
-    runner = AgentRunner(tools=[], system_prompt="基础系统提示词")
+    runner = create_runner(tools=get_function_declarations(), system_prompt="基础系统提示词")
 
     events = [
         event
@@ -163,7 +163,7 @@ async def test_runner_appends_reset_runtime_notice_when_history_has_prior_plan(
         )
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
@@ -195,7 +195,7 @@ async def test_runner_appends_reset_runtime_notice_when_history_has_prior_plan(
             parts=[types.Part.from_text(text="旧任务已完成")],
         ),
     ]
-    runner = AgentRunner(tools=[], system_prompt="基础系统提示词")
+    runner = create_runner(tools=get_function_declarations(), system_prompt="基础系统提示词")
 
     events = [
         event

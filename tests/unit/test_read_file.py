@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent_service.tools.read_file import ReadFileTool
+from agent_service.adapters.tools.read_file import ReadFileTool
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent_service.core.plan import ExecutionPlan, PlanStep
+from agent_service.kernel.strategy.plan import ExecutionPlan, PlanStep
 
 
 def test_execution_plan_lifecycle_and_completion():

@@ -2,9 +2,9 @@ from subprocess import CompletedProcess
 
 import pytest
 
-from agent_service.tools import quality_check
-from agent_service.tools.quality_check import QualityCheckTool
-from agent_service.tools.workspace import WorkspacePathPolicy
+from agent_service.adapters.security.workspace import WorkspacePathPolicy
+from agent_service.adapters.tools import quality_check
+from agent_service.adapters.tools.quality_check import QualityCheckTool
 
 
 @pytest.mark.asyncio
@@ -14,7 +14,7 @@ async def test_quality_check_uses_fixed_argv_and_sanitized_environment(
 ):
     calls = []
     monkeypatch.setenv("GEMINI_API_KEY", "不能泄露")
-    monkeypatch.setenv("AGENT_SERVICE_DATABASE_URL", "不能泄露")
+    monkeypatch.setenv("PRIVATE_TEST_SECRET", "不能泄露")
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
@@ -31,7 +31,7 @@ async def test_quality_check_uses_fixed_argv_and_sanitized_environment(
     assert kwargs["shell"] is False
     assert kwargs["cwd"] == tmp_path.resolve()
     assert "GEMINI_API_KEY" not in kwargs["env"]
-    assert "AGENT_SERVICE_DATABASE_URL" not in kwargs["env"]
+    assert "PRIVATE_TEST_SECRET" not in kwargs["env"]
 
 
 @pytest.mark.asyncio

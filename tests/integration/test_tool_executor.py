@@ -3,15 +3,11 @@
 import pytest
 from google.genai import types
 
-from agent_service.tools.executor import execute_tools
-from agent_service.tools.index import (
-    ALL_TOOLS,
-    TOOL_REGISTRY,
-    create_web_tool_registry,
-    find_tool,
+from agent_service.adapters.tools.index import (
+    create_tool_registry,
     get_function_declarations,
 )
-from agent_service.tools.workspace import WorkspacePathPolicy
+from agent_service.kernel.dispatch.executor import execute_tools
 
 
 @pytest.mark.asyncio
@@ -23,7 +19,7 @@ async def test_execute_tools_dispatches_registered_tool(tmp_path):
         args={"path": str(target)},
     )
 
-    batch = await execute_tools([function_call])
+    batch = await execute_tools([function_call], tool_registry=create_tool_registry())
     response = batch.content
 
     assert response.role == "user"
@@ -48,7 +44,7 @@ async def test_execute_tools_reports_unknown_tool():
         args={},
     )
 
-    batch = await execute_tools([function_call])
+    batch = await execute_tools([function_call], tool_registry=create_tool_registry())
     response = batch.content
 
     parts = response.parts
@@ -72,7 +68,7 @@ async def test_execute_tools_enforces_allowed_tool_names(tmp_path):
     )
 
     batch = await execute_tools(
-        [function_call],
+        [function_call], tool_registry=create_tool_registry(),
         allowed_tool_names=frozenset(),
     )
 
@@ -91,9 +87,9 @@ async def test_execute_tools_requires_single_call_approval_for_write(tmp_path):
         args={"path": str(target), "content": "已批准"},
     )
 
-    denied = await execute_tools([function_call])
+    denied = await execute_tools([function_call], tool_registry=create_tool_registry())
     approved = await execute_tools(
-        [function_call],
+        [function_call], tool_registry=create_tool_registry(),
         approved_tool_call_ids=frozenset({"call-approval"}),
     )
 
@@ -103,12 +99,11 @@ async def test_execute_tools_requires_single_call_approval_for_write(tmp_path):
 
 
 def test_tool_registry_exposes_function_declarations():
-    assert find_tool("read_file") is not None
-    assert find_tool("web_search") is not None
-    assert find_tool("fetch_web_page") is not None
-    assert len(TOOL_REGISTRY) == len(ALL_TOOLS)
+    registry = create_tool_registry()
+    assert {"read_file", "web_search", "fetch_web_page"} <= registry.keys()
+    assert registry["read_file"] is not create_tool_registry()["read_file"]
 
-    declarations = get_function_declarations()
+    declarations = get_function_declarations(registry)
     function_declarations = declarations[0].function_declarations
     assert function_declarations is not None
     names = {declaration.name for declaration in function_declarations}
@@ -117,35 +112,3 @@ def test_tool_registry_exposes_function_declarations():
     assert "write_file" in names
     assert "web_search" in names
     assert "fetch_web_page" in names
-
-
-def test_web_read_only_registry_is_explicit_and_fail_closed():
-    from agent_service.tools.index import get_read_only_tool_names
-
-    assert get_read_only_tool_names() == frozenset({"list_files", "read_file"})
-    assert "load_yaml" not in get_read_only_tool_names()
-    assert "web_search" not in get_read_only_tool_names()
-    assert "fetch_web_page" not in get_read_only_tool_names()
-
-
-@pytest.mark.asyncio
-async def test_web_tool_registries_do_not_share_workspace_state(tmp_path):
-    first_root = tmp_path / "first"
-    second_root = tmp_path / "second"
-    first_root.mkdir()
-    second_root.mkdir()
-    (first_root / "same.txt").write_text("第一个工作区", encoding="utf-8")
-    (second_root / "same.txt").write_text("第二个工作区", encoding="utf-8")
-    first_registry = create_web_tool_registry(WorkspacePathPolicy(first_root))
-    second_registry = create_web_tool_registry(WorkspacePathPolicy(second_root))
-    function_call = types.FunctionCall(
-        id="read-call",
-        name="read_file",
-        args={"path": "same.txt"},
-    )
-
-    first = await execute_tools([function_call], tool_registry=first_registry)
-    second = await execute_tools([function_call], tool_registry=second_registry)
-
-    assert first.executions[0].result.content == "第一个工作区"
-    assert second.executions[0].result.content == "第二个工作区"

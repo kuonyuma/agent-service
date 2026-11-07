@@ -1,12 +1,11 @@
 import asyncio
 
-from agent_service.core.runner import AgentRunner
-from agent_service.ui.app import App
+from agent_service.bootstrap import create_app, create_runner
 
 
 async def main():
-    async with AgentRunner() as runner:
-        app = App(runner=runner)
+    async with create_runner() as runner:
+        app = create_app(runner)
         await app.run()
 
 

@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent_service.tools.write_file import WriteFileTool
+from agent_service.adapters.tools.write_file import WriteFileTool
 
 
 @pytest.mark.asyncio

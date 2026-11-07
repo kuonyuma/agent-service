@@ -7,18 +7,20 @@ from unittest.mock import AsyncMock
 import pytest
 from google.genai import types
 
-import agent_service.core.agentic_loop as loop_module
-from agent_service.client.stream_message import StreamEvent, StreamResult
+import agent_service.adapters.gemini.model as loop_module
+from agent_service.adapters.collaboration.manager import SubagentManager
+from agent_service.adapters.security.coordinator import BLOCKED_MESSAGE, RunCoordinator
+from agent_service.adapters.security.reviewer import ReviewResult
 from agent_service.config.settings import SafetyConfig
-from agent_service.core.agentic_loop import LoopEvent, LoopResult, ToolApprovalRequest
-from agent_service.core.control import RunControl
-from agent_service.core.coordinator import BLOCKED_MESSAGE, RunCoordinator
-from agent_service.core.runner import AgentRunner
-from agent_service.core.subagent import SubagentManager
 from agent_service.errors import SafetyBlockedError, SafetyReviewError
-from agent_service.safety.reviewer import ReviewResult
-from agent_service.tools.base import Tool, ToolResult
-from agent_service.tools.executor import execute_tools
+from agent_service.kernel.dispatch.approval import ToolApprovalRequest
+from agent_service.kernel.dispatch.base import Tool, ToolResult
+from agent_service.kernel.dispatch.executor import execute_tools
+from agent_service.kernel.model.port import StreamEvent, StreamResult
+from agent_service.kernel.runtime.control import RunControl
+from agent_service.kernel.runtime.events import LoopEvent, LoopResult
+from agent_service.kernel.runtime.runner import AgentRunner
+from tests.support import create_runner
 
 FAST = SafetyConfig(
     chunk_chars=1,
@@ -328,7 +330,7 @@ async def test_real_loop_checkpoint_keeps_complete_tool_pairs_and_removes_text(
             await asyncio.Event().wait()
 
     monkeypatch.setattr(loop_module, "stream_message", model)
-    runner = AgentRunner(tool_registry={"record": tool}, plan_and_execute=False)
+    runner = create_runner(tool_registry={"record": tool}, plan_and_execute=False)
 
     async def allow(request):
         return True

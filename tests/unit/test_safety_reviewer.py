@@ -4,9 +4,9 @@ from unittest.mock import AsyncMock
 import pytest
 from google.genai import types
 
-import agent_service.safety.reviewer as reviewer_module
+import agent_service.adapters.security.reviewer as reviewer_module
+from agent_service.adapters.security.reviewer import GeminiTextReviewer
 from agent_service.config.settings import settings
-from agent_service.safety.reviewer import GeminiTextReviewer
 
 
 @pytest.mark.parametrize(

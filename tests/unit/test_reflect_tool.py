@@ -2,8 +2,8 @@
 
 import pytest
 
-from agent_service.core.plan import ExecutionPlan
-from agent_service.tools.reflect_tool import ReflectTool
+from agent_service.adapters.tools.reflect_tool import ReflectTool
+from agent_service.kernel.strategy.plan import ExecutionPlan
 
 
 @pytest.mark.asyncio

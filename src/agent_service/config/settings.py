@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from math import isfinite # isfinite(value) 用来判断一个数是不是有限数
+from math import isfinite  # isfinite(value) 用来判断一个数是不是有限数
 from pathlib import Path
 
 import yaml

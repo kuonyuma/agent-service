@@ -3,7 +3,7 @@
 执行前需要配置 GEMINI_API_KEY，并显式传入 --run-external。
 """
 
-from agent_service.client.client import get_client
+from agent_service.adapters.gemini.client import get_client
 from agent_service.config.settings import settings
 
 

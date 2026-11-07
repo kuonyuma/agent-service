@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import agent_service.client.client as client_module
+import agent_service.adapters.gemini.client as client_module
 from agent_service.errors import ConfigurationError
 
 
@@ -45,7 +45,7 @@ async def test_close_client_releases_sync_and_async_clients(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stream_message_extracts_cached_content_token_count(monkeypatch):
-    import agent_service.client.stream_message as stream_module
+    import agent_service.adapters.gemini.stream as stream_module
 
     async def fake_chunks():
         yield SimpleNamespace(

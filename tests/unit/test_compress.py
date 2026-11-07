@@ -6,12 +6,13 @@
 import pytest
 from google.genai import types
 
-import agent_service.core.context
-from agent_service.client.stream_message import StreamEvent, StreamResult
-from agent_service.core.context import compress_context
+import agent_service.adapters.gemini.model
+from agent_service.adapters.gemini.model import GeminiModel
+from agent_service.kernel.context.compression import compress_context
+from agent_service.kernel.model.port import StreamEvent, StreamResult
 
 
-async def _fake_stream_message(contents, system_prompt, max_tokens):
+async def _fake_stream_message(contents, system_prompt, max_tokens, tools=None):
     """模拟 LLM 流式返回压缩摘要。"""
 
     yield StreamEvent(
@@ -46,7 +47,7 @@ async def test_compress_below_threshold(count, expected_length):
     """消息数低于阈值时不触发压缩。"""
 
     mock_contents = make_contents(count)
-    compressed = await compress_context(mock_contents, max_history_len=10)
+    compressed = await compress_context(mock_contents, max_history_len=10, model=GeminiModel())
 
     assert len(compressed) == expected_length
     assert compressed is mock_contents
@@ -65,12 +66,12 @@ async def test_compress_exceed_threshold(monkeypatch, count, expected_length):
 
     mock_contents = make_contents(count)
     monkeypatch.setattr(
-        agent_service.core.context,
+        agent_service.adapters.gemini.model,
         "stream_message",
         _fake_stream_message,
     )
 
-    compressed = await compress_context(mock_contents, max_history_len=10)
+    compressed = await compress_context(mock_contents, max_history_len=10, model=GeminiModel())
 
     assert len(compressed) == expected_length
     assert compressed[0].role == "user"
@@ -92,7 +93,7 @@ async def test_compress_with_tool_call_history_avoids_invalid_role_or_orphan_cal
 
     captured_summary_query: list[types.Content] = []
 
-    async def capture_stream_message(contents, system_prompt, max_tokens):
+    async def capture_stream_message(contents, system_prompt, max_tokens, tools=None):
         captured_summary_query.extend(contents)
         yield StreamEvent(
             type="message_done",
@@ -104,7 +105,7 @@ async def test_compress_with_tool_call_history_avoids_invalid_role_or_orphan_cal
         )
 
     monkeypatch.setattr(
-        agent_service.core.context,
+        agent_service.adapters.gemini.model,
         "stream_message",
         capture_stream_message,
     )
@@ -200,7 +201,7 @@ async def test_compress_with_tool_call_history_avoids_invalid_role_or_orphan_cal
         ),
     ]
 
-    compressed = await compress_context(tool_history, max_history_len=10)
+    compressed = await compress_context(tool_history, max_history_len=10, model=GeminiModel())
 
     # 1. 发送给压缩摘要模型的请求必须是纯文本 user 消息，不含孤立 function_call
     assert len(captured_summary_query) == 1

@@ -5,10 +5,9 @@ import asyncio
 import pytest
 from google.genai import types
 
-import agent_service.core.agentic_loop
-from agent_service.client.stream_message import StreamEvent, StreamResult
-from agent_service.core.agentic_loop import query
-from agent_service.tools.index import get_function_declarations
+import agent_service.adapters.gemini.model
+from agent_service.kernel.model.port import StreamEvent, StreamResult
+from tests.support import get_function_declarations, query
 
 
 def message_done(
@@ -181,11 +180,16 @@ async def test_concurrent_explorers_and_worker_handoff_in_full_loop(
                     ),
                 ]
             )
+        elif turn_count == 3:
+            # 父运行自行回读，不能用子代理的验证核销父级待验证状态。
+            yield message_done(function_calls=[
+                types.FunctionCall(name="read_file", args={"path": str(file_a)})
+            ])
         else:
             yield message_done(contents="主控已完成所有多代理协同任务。")
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
@@ -227,9 +231,9 @@ async def test_concurrent_explorers_and_worker_handoff_in_full_loop(
 
     assert events[-1].type == "run.completed"
     assert events[-1].result is not None
-    # 主代理 3 轮 + explorer-1 (2 轮) + explorer-2 (2 轮) + worker-1 (3 轮) = 共 10 次模型请求
-    assert events[-1].result.usage["input_len"] == 100
-    assert events[-1].result.usage["output_len"] == 50
+    # 主代理 4 轮 + explorer-1 (2 轮) + explorer-2 (2 轮) + worker-1 (3 轮) = 共 11 次模型请求。
+    assert events[-1].result.usage["input_len"] == 110
+    assert events[-1].result.usage["output_len"] == 55
 
 
 @pytest.mark.asyncio
@@ -270,7 +274,7 @@ async def test_subagent_graceful_final_turn_strips_tools_and_summarizes(
             )
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
@@ -315,7 +319,7 @@ async def test_concurrent_workers_editing_same_file_are_serialized_by_file_lock(
     文件互斥锁保证读-改-写原子串行，两处修改均完整保留、不发生覆盖丢失。
     """
 
-    from agent_service.tools.edit_file import EditFileTool
+    from agent_service.adapters.tools.edit_file import EditFileTool
 
     shared_file = tmp_path / "shared.py"
     shared_file.write_text("A = 1\nB = 2\n", encoding="utf-8")

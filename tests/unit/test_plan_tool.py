@@ -2,8 +2,8 @@
 
 import pytest
 
-from agent_service.core.plan import ExecutionPlan
-from agent_service.tools.plan_tool import UpdatePlanTool
+from agent_service.adapters.tools.plan_tool import UpdatePlanTool
+from agent_service.kernel.strategy.plan import ExecutionPlan
 
 
 @pytest.mark.asyncio

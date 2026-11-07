@@ -6,10 +6,9 @@
 import pytest
 from google.genai import types
 
-import agent_service.core.agentic_loop
-from agent_service.client.stream_message import StreamEvent, StreamResult
-from agent_service.core.agentic_loop import query
-from agent_service.tools.index import get_function_declarations
+import agent_service.adapters.gemini.model
+from agent_service.kernel.model.port import StreamEvent, StreamResult
+from tests.support import get_function_declarations, query
 
 
 def message_done(
@@ -100,6 +99,10 @@ async def test_query_plan_and_execute_full_lifecycle(monkeypatch, tmp_path):
             yield message_done(function_calls=[read_call, plan_call])
         elif call_count == 2:
             yield message_done(function_calls=[write_call, finish_step_call])
+        elif call_count == 3:
+            yield message_done(function_calls=[
+                types.FunctionCall(name="read_file", args={"path": str(target)})
+            ])
         else:
             yield message_done(
                 contents="任务完成",
@@ -107,7 +110,7 @@ async def test_query_plan_and_execute_full_lifecycle(monkeypatch, tmp_path):
             )
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
@@ -142,11 +145,13 @@ async def test_query_plan_and_execute_full_lifecycle(monkeypatch, tmp_path):
         "tool.completed",
         "tool.completed",
         "plan.updated",
+        "tool.requested",
+        "tool.completed",
         "run.completed",
     ]
     assert events[-1].result is not None
     assert events[-1].result.reason == "completed"
-    assert events[-1].result.turns == 3
+    assert events[-1].result.turns == 4
     assert events[-1].result.plan is not None
     assert events[-1].result.plan.is_completed()
     assert target.read_text(encoding="utf-8") == "工具已经执行"
@@ -183,7 +188,7 @@ async def test_planning_phase_blocks_mutating_tool_before_plan_created(
         return True
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
@@ -192,7 +197,7 @@ async def test_planning_phase_blocks_mutating_tool_before_plan_created(
         event
         async for event in query(
             initial_contents(),
-            tools=[],
+            tools=get_function_declarations(),
             permission_check=allow,
         )
     ]
@@ -274,12 +279,12 @@ async def test_dynamic_replan_and_unfinished_step_reminder(monkeypatch):
             )
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
 
-    events = [event async for event in query(initial_contents(), tools=[])]
+    events = [event async for event in query(initial_contents(), tools=get_function_declarations())]
     plan_events = [event for event in events if event.type == "plan.updated"]
 
     assert len(plan_events) == 3
@@ -334,7 +339,7 @@ async def test_query_does_not_execute_denied_write_tool(monkeypatch, tmp_path):
         return False
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
@@ -343,7 +348,7 @@ async def test_query_does_not_execute_denied_write_tool(monkeypatch, tmp_path):
         event
         async for event in query(
             initial_contents(),
-            tools=[],
+            tools=get_function_declarations(),
             permission_check=deny,
         )
     ]
@@ -399,7 +404,7 @@ async def test_rejected_write_does_not_reject_read_tool_in_same_batch(
         return False
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
@@ -408,7 +413,7 @@ async def test_rejected_write_does_not_reject_read_tool_in_same_batch(
         event
         async for event in query(
             initial_contents(),
-            tools=[],
+            tools=get_function_declarations(),
             permission_check=reject_write,
             plan_and_execute=False,
         )
@@ -449,7 +454,7 @@ async def test_query_denies_write_tool_without_permission_callback(
             )
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
@@ -458,7 +463,7 @@ async def test_query_denies_write_tool_without_permission_callback(
         event
         async for event in query(
             initial_contents(),
-            tools=[],
+            tools=get_function_declarations(),
             plan_and_execute=False,
         )
     ]
@@ -484,12 +489,12 @@ async def test_query_stops_after_ten_tool_turns(monkeypatch):
         )
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
 
-    events = [event async for event in query(initial_contents(), tools=[])]
+    events = [event async for event in query(initial_contents(), tools=get_function_declarations())]
 
     assert call_count == 10
     assert events[-1].type == "run.failed"
@@ -503,12 +508,12 @@ async def test_query_stops_when_function_call_has_no_name(monkeypatch):
         yield message_done(function_calls=[types.FunctionCall(args={})])
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
 
-    events = [event async for event in query(initial_contents(), tools=[])]
+    events = [event async for event in query(initial_contents(), tools=get_function_declarations())]
 
     assert [event.type for event in events] == ["run.failed"]
     assert events[-1].result is not None
@@ -588,7 +593,7 @@ async def test_error_reflection_locks_mutating_tools_until_reflect_called(
                 ]
             )
         elif call_count == 4:
-            # Turn 4: 恢复至 executing 阶段，写工具已重新解锁，修改并读取验证、完成步骤
+            # 第 4 轮：恢复执行、修改并完成步骤；读取验证必须放在后续批次。
             yield message_done(
                 function_calls=[
                     types.FunctionCall(
@@ -599,13 +604,13 @@ async def test_error_reflection_locks_mutating_tools_until_reflect_called(
                             "new_string": "value = 2",
                         },
                     ),
-                    types.FunctionCall(
-                        name="read_file",
-                        args={"path": str(target)},
-                    ),
                     complete_step_call("step-1"),
                 ]
             )
+        elif call_count == 5:
+            yield message_done(function_calls=[
+                types.FunctionCall(name="read_file", args={"path": str(target)})
+            ])
         else:
             yield message_done(
                 contents="修改已验证完成",
@@ -613,7 +618,7 @@ async def test_error_reflection_locks_mutating_tools_until_reflect_called(
             )
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
@@ -638,8 +643,8 @@ async def test_error_reflection_locks_mutating_tools_until_reflect_called(
     assert "reflect" in declared_tool_names_by_turn[2]
     assert "edit_file" in declared_tool_names_by_turn[3]
 
-    # 验证全流程 5 轮中 system_prompt 完全固定不变，且反思切入通知通过历史尾部 <runtime-notice> 传达
-    assert len(system_prompts_by_turn) == 5
+    # 验证全流程 6 轮中 system_prompt 固定不变，反思通知通过历史尾部传达。
+    assert len(system_prompts_by_turn) == 6
     assert len(set(system_prompts_by_turn)) == 1
     assert turn3_last_parts[-1].text is not None
     assert "<runtime-notice>" in turn3_last_parts[-1].text
@@ -728,7 +733,7 @@ async def test_pre_completion_verification_triggers_reflection_after_unverified_
             )
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
@@ -761,13 +766,13 @@ async def test_pre_completion_verification_triggers_reflection_after_unverified_
 async def test_two_stage_web_search_then_fetch_web_page_in_loop(monkeypatch):
     """验证模型先调用 web_search 获取候选链接，再主动调用 fetch_web_page 深入阅读的两步链路。"""
 
-    from agent_service.tools.fetch_web_page import (
+    from agent_service.adapters.tools.fetch_web_page import (
         FetchedPageResponse,
         FetchWebPageTool,
         OutputFormat,
     )
-    from agent_service.tools.index import TOOL_REGISTRY
-    from agent_service.tools.web_search import WebSearchTool
+    from agent_service.adapters.tools.index import create_tool_registry
+    from agent_service.adapters.tools.web_search import WebSearchTool
 
     search_queries: list[str] = []
     fetched_urls: list[str] = []
@@ -799,7 +804,7 @@ async def test_two_stage_web_search_then_fetch_web_page_in_loop(monkeypatch):
         )
 
     custom_registry = {
-        **TOOL_REGISTRY,
+        **create_tool_registry(),
         "web_search": WebSearchTool(fetcher=fake_search_fetcher),
         "fetch_web_page": FetchWebPageTool(fetcher=fake_page_fetcher),
     }
@@ -840,7 +845,7 @@ async def test_two_stage_web_search_then_fetch_web_page_in_loop(monkeypatch):
             )
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )
@@ -934,7 +939,7 @@ async def test_same_batch_reflect_and_failing_tool_ends_in_reflecting_with_notic
             )
 
     monkeypatch.setattr(
-        agent_service.core.agentic_loop,
+        agent_service.adapters.gemini.model,
         "stream_message",
         fake_stream_message,
     )

@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent_service.tools.list_files import ListFilesTool
+from agent_service.adapters.tools.list_files import ListFilesTool
 
 
 @pytest.mark.asyncio

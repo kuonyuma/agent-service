@@ -6,9 +6,9 @@
 - **乙方目标**：通过逐项实现真实需求，学习持久化、异步与进程管理、安全、状态机、并发控制、容错和工程评测。
 - **需求范围**：CLI 及其背后的 Runtime、工具和子代理，不涉及 Web 页面、HTTP API 或 Web 数据库链路。
 - **交付方式**：本文是分期交付的需求池，不要求一次完成全部模块；第四期为进阶选修。
-- **状态说明**：需求与验收标准描述的是目标能力，不代表已经实现。现状判断来自 CLI 相关代码与测试代码的静态阅读，未运行测试或真实模型验证。
+- **状态说明**：需求与验收标准描述的是目标能力，不代表已经实现。现状表已按五模块内核重构更新；架构回归不等于本文全部产品需求已验收，真实模型能力仍需单独验证。
 - **接口说明**：文中的斜杠命令是拟议交互，不代表当前 CLI 已支持；具体命名可在设计时确定。
-- **路径说明**：下文源码路径均相对于仓库根目录；行号仅用于定位编写时的实现，后续可能随代码变化。
+- **路径说明**：下文源码路径均相对于仓库根目录，以模块和符号定位，避免重构后行号失效。
 
 核心原则：
 
@@ -34,11 +34,11 @@
 
 | 当前实现 | 对产品的影响 |
 | --- | --- |
-| `src/agent_service/ui/app.py:46` 的历史保存在 `self.contents` 中 | 关闭进程后，CLI 没有可恢复的持久会话 |
-| `src/agent_service/tools/run_command.py:35` 使用 `asyncio.to_thread(subprocess.run, ...)` | 有异步包装，但还缺命令超时、实时日志和进程生命周期管理；取消协程不等于终止命令进程 |
-| `src/agent_service/tools/run_command.py:47` 返回 `is_error=False`，包括非零退出的情况 | “工具执行完了”与“命令验证通过了”没有清楚区分 |
-| `src/agent_service/core/plan.py:299` 的 `mark_verified()` 直接清空待验证修改 | 当前“已验证”状态不能直接理解成“相关测试通过” |
-| `src/agent_service/core/context.py:34` 已经实现压缩，但主要按消息条数触发 | 已经有压缩基础，下一步是解决预算、信息保留和可追溯性 |
+| `src/agent_service/adapters/cli/app.py` 的历史保存在 `self.contents` 中 | 关闭进程后，CLI 没有可恢复的持久会话 |
+| `src/agent_service/adapters/tools/run_command.py` 使用 `asyncio.to_thread(subprocess.run, ...)` | 仍缺命令超时、实时日志和进程生命周期管理；取消协程不等于终止命令进程 |
+| `src/agent_service/adapters/tools/run_command.py` 已将非零退出码标记为工具错误 | 失败不能冒充验证成功，但零退出仍不代表执行了有意义的验证 |
+| `src/agent_service/kernel/strategy/policy.py` 按路径记录修改，同批次或子代理验证不能自动核销父级修改 | 验证提醒仍是有限策略，不是测试覆盖或正确性的证明；仍需结构化证据与交付约束 |
+| `src/agent_service/kernel/context/compression.py` 按消息条数触发压缩，并注入模型端口 | 下一步是解决预算、信息保留和可追溯性 |
 
 ## 三、第一期：可信的日常使用基础
 

@@ -23,27 +23,3 @@ class SafetyBlockedError(AgentRuntimeError):
 
 class SafetyReviewError(AgentRuntimeError):
     """无法可靠完成输出文本审核。"""
-
-
-class ConversationNotFoundError(AgentServiceError):
-    """指定会话不存在。"""
-
-
-class RunNotFoundError(AgentServiceError):
-    """指定运行不存在。"""
-
-
-class ToolCallNotFoundError(AgentServiceError):
-    """指定工具调用不存在。"""
-
-
-class ConversationBusyError(AgentServiceError):
-    """会话已经存在一个活跃运行。"""
-
-
-class ApprovalConflictError(AgentServiceError):
-    """工具审批已终结、已超时或不处于可审批状态。"""
-
-
-class PersistenceError(AgentServiceError):
-    """运行状态无法可靠地持久化。"""

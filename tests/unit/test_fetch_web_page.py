@@ -3,7 +3,7 @@
 import httpx
 import pytest
 
-from agent_service.tools.fetch_web_page import (
+from agent_service.adapters.tools.fetch_web_page import (
     FetchedPageResponse,
     FetchWebPageTool,
     OutputFormat,

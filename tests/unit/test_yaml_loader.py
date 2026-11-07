@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent_service.tools.yaml_loader import LoadYamlTool
+from agent_service.adapters.tools.yaml_loader import LoadYamlTool
 
 
 @pytest.mark.asyncio

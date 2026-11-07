@@ -3,7 +3,7 @@
 import httpx
 import pytest
 
-from agent_service.tools.web_search import (
+from agent_service.adapters.tools.web_search import (
     WebSearchTool,
     parse_duckduckgo_html,
     unwrap_search_url,

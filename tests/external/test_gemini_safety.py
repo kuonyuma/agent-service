@@ -4,9 +4,9 @@ import asyncio
 
 import pytest
 
-from agent_service.client.client import close_client
-from agent_service.client.stream_message import stream_message
-from agent_service.safety.reviewer import GeminiTextReviewer
+from agent_service.adapters.gemini.client import close_client
+from agent_service.adapters.gemini.stream import stream_message
+from agent_service.adapters.security.reviewer import GeminiTextReviewer
 
 
 @pytest.mark.parametrize(

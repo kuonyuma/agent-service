@@ -5,7 +5,7 @@
 
 import pytest
 
-from agent_service.tools.run_command import RunCommandTool
+from agent_service.adapters.tools.run_command import RunCommandTool
 
 
 @pytest.mark.asyncio

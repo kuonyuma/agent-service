@@ -4,8 +4,8 @@ from subprocess import CompletedProcess
 
 import pytest
 
-from agent_service.tools import run_command
-from agent_service.tools.run_command import RunCommandTool
+from agent_service.adapters.tools import run_command
+from agent_service.adapters.tools.run_command import RunCommandTool
 
 
 @pytest.mark.asyncio
@@ -44,7 +44,7 @@ async def test_run_command_returns_nonzero_exit_output(monkeypatch):
 
     result = await RunCommandTool().run({"command": "exit 1"})
 
-    assert not result.is_error
+    assert result.is_error
     assert result.content == "执行失败returncode1"
 
 

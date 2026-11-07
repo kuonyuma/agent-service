@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent_service.client.stream_message import stream_message
+from agent_service.adapters.gemini.stream import stream_message
 
 
 @pytest.mark.asyncio
